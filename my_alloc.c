@@ -1,5 +1,11 @@
+/*
+ * The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL
+ * NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED",  "MAY", and
+ * "OPTIONAL" in this document are to be interpreted as described in
+ * RFC 2119.
+ */
+
 #include <stdlib.h>
-#include <stdio.h>
 #include "my_alloc.h"
 #include "my_system.h"
 
@@ -10,158 +16,151 @@
 //#define DEBUG_GETBLOCK
 //#define DEBUG_FREE
 
+// === The Idea ===
+// Each block contains only objects of equal size.
+// Each block is part of one stack, which only contains blocks with the same object size.
+// An object MUST be stored within a space, which contains a spaceHeader and the object.
+// The stack contains a linked list of free spaces.
+
+// sizeof(freelist) MUST be < 8, so it fits in any object
 typedef struct freelist {
-    struct freelist *nextFree;
+    struct freelist *nextFreeObject;
 } freelist;
 
+typedef void block;
+
 typedef struct stack {
-    void *firstblock;
-    void *currentblock;
-    freelist *freesection;
+    block *currentblock;
+    freelist *freeObjectList;
 } stack;
 
-
-// stack n contains only elements of size (n+1)*8
 stack stackarray[NR_STACKS];
 
+// Any object MUST be preceded by a spaceHeader
+typedef struct spaceHeader {
+    stack *parentStack;
+} spaceHeader;
 
-// last 8 bytes in block are pointer to next block.
+spaceHeader *headerOf(void *objectLocation) {
+    return objectLocation - sizeof(spaceHeader);
+}
 
 void init_my_alloc() {
+
+    //TODO
+    //  Get first block on first allocation, not on init
+
 #ifdef DEBUG_INIT
     printf("Initializing.\n");
 #endif
     for (int i = 0; i < NR_STACKS; i++) {
 #ifdef DEBUG_INIT
-        printf("Initializing stack %d.\n", i);
+        printf("Initializing stack %d for objects sized %d.\n", i, (i + 1) * 8);
 #endif
-        stackarray[i].firstblock = get_block_from_system();
+        stackarray[i].currentblock = get_block_from_system();
 #ifdef DEBUG_GETBLOCK
-        printf("\tAllocated new block at %p\n", stackarray[i].firstblock);
+        printf("\tAllocated new block at %p\n", stackarray[i].currentblock);
 #endif
-        // Initial block has no blocks following it
-        *(void **) (stackarray[i].firstblock + BLOCKSIZE - 8) = 0;
-        stackarray[i].currentblock = stackarray[i].firstblock;
-        stackarray[i].freesection = (freelist *) stackarray[i].firstblock;
-        stackarray[i].freesection->nextFree = 0;
+        // Next free space is start of block, next free object will be preceded by spaceHeader
+        stackarray[i].freeObjectList = stackarray[i].currentblock + sizeof(spaceHeader);
+#ifdef DEBUG_INIT
+        printf("\t First object will be stored at %p.\n", stackarray[i].freeObjectList);
+#endif
+        // Next free space is last known space
+        stackarray[i].freeObjectList->nextFreeObject = 0;
     }
 #ifdef DEBUG_INIT
     printf("Done.\n");
 #endif
 }
 
+
 void *my_alloc(size_t size) {
 #ifdef DEBUG_ALLOC
     printf("Allocating space for object of size %ld.\n", size);
 #endif
 
+    // index = size/8 - 1
     stack *currentStack = &stackarray[(size >> 3) - 1];
-    freelist *f = currentStack->freesection;
 
 #ifdef DEBUG_ALLOC
-    printf("\tUsing stack nr %ld at %p, next free space is at %p.\n", (size >> 3) - 1, currentStack, f);
+    printf("\tUsing stack nr %ld at %p.\n", (size >> 3) - 1, currentStack);
 #endif
 
-    if (f->nextFree == 0) {
-        // Nach freiem Block nichts belegt.
+    void *newObjectLocation = currentStack->freeObjectList;
+#ifdef DEBUG_ALLOC
+    printf("\tLocation for new object is %p.\n", newObjectLocation);
+#endif
+
+    void *newSpaceLocation = newObjectLocation - sizeof(spaceHeader);
 
 #ifdef DEBUG_ALLOC
-        printf("\tNext free section is at the end.\n");
-        printf("\tAdresse des nextBlockP ist %p\n", currentStack->currentblock + BLOCKSIZE - 8);
-        printf("\tAdresse direkt nach neuem Objekt ist %p\n", ((void *) f) + size);
+    printf("\tLocation for new space is %p on block %p.\n", newSpaceLocation, currentStack->currentblock);
 #endif
 
-        // (adresse nach neuem objekt) >= blockende
-        if (((void *) f) + 2 * size > currentStack->currentblock + BLOCKSIZE - 8) {
+    // Set header
+    spaceHeader *h = headerOf(newObjectLocation);
+    h->parentStack = currentStack;
+
+
+    if (currentStack->freeObjectList->nextFreeObject == 0) {
+
+#ifdef DEBUG_ALLOC
+        printf("\tNext free space is undefined, so it will be behind the current space.\n");
+#endif
+
+        // Space to use is last known space.
+        // Things to do now:
+        // If the current block can fit another space:
+        //  Set the first free space in stack to the next space
+        // Else:
+        //  Allocate a new block
+        //  Set the first free space in stack to the start of the new block
+
+        // &lastByteOfPotentialNewSpace + 1 <= &lastByteInBlock + 1
+        if (newSpaceLocation + 2 * (sizeof(spaceHeader) + size) <= currentStack->currentblock + BLOCKSIZE) {
+            currentStack->freeObjectList = newObjectLocation + size + sizeof(spaceHeader);
+#ifdef DEBUG_ALLOC
+            printf("\tNext space will fit on block.\n");
+#endif
+        } else {
+#ifdef DEBUG_ALLOC
+            printf("\tNext space will need new block.\n");
+#endif
             // Next free space is on new block
             void *newBlock = get_block_from_system();
 #ifdef DEBUG_GETBLOCK
             printf("\tAllocated new block at %p\n", newBlock);
 #endif
-
-            // Set last 8 bytes of current block to pointer to next block
-            *(void **) (currentStack->currentblock + BLOCKSIZE - 8) = newBlock;
-
-            // Next free space is start of new block
+            currentStack->freeObjectList = newBlock + sizeof(spaceHeader);
             currentStack->currentblock = newBlock;
-            currentStack->freesection = newBlock;
-        } else {
-            // Next free space is directly behind the just requested object and fits on current block
-            currentStack->freesection = ((void *) currentStack->freesection) + size;
         }
+        currentStack->freeObjectList->nextFreeObject = 0;
     } else {
-        // We are not at the end of used space, so we have a pointer to the next free space
-        currentStack->freesection = f->nextFree;
-    }
 
-    return f;
+        // The current free space contains a pointer to the next free space
+#ifdef DEBUG_ALLOC
+        printf("\tThe space we are assigning right now contains a pointer to the next free object: %p\n",
+               currentStack->freeObjectList->nextFreeObject);
+#endif
+        currentStack->freeObjectList = currentStack->freeObjectList->nextFreeObject;
+    }
+#ifdef DEBUG_ALLOC
+    printf("\tDone allocating %p.\n", newObjectLocation);
+#endif
+    return newObjectLocation;
 }
 
 void my_free(void *ptr) {
-    void *block;
-    int index = -1;
+    spaceHeader *header = headerOf(ptr);
 #ifdef DEBUG_FREE
-    printf("Searching for pointer %p\n", ptr);
+    printf("Free on stack %p\n", header->parentStack);
 #endif
-    bool found = false;
-    // Search for stack containing pointer
-    for (int i = 0; i < NR_STACKS; i++) {
-#ifdef DEBUG_FREE
-        printf("\tSearching stack %d\n", i);
-#endif
-        block = stackarray[i].firstblock;
-        int bc = 0;
-        while (true) {
-#ifdef DEBUG_FREE
-            printf("\t\tSearching block at %p\n", block);
-#endif
-            ++bc;
-            // Test of pointer is in range of block
-            if (ptr >= block && ptr < (block + BLOCKSIZE - 8)) {
-                found = true;
-                break;
-            }
-
-            // Not found in this block
-            void *nextBlockAddress = *(void **) (block + BLOCKSIZE - 8);
-            if (nextBlockAddress == 0) {
-                // Last block in stack, search next stack.
-                // printf("searched %d blocks.\n", bc);
-                break;
-            } else {
-                // More blocks in stack, go to next block.
-                block = nextBlockAddress;
-            }
-        }
-        if (found) {
-            // Found pointer in stack i.
-            index = i;
-#ifdef DEBUG_FREE
-            printf("\t\tYay! Found pointer on stack %d\n", index);
-#endif
-            break;
-        }
-    }
-
-    if (!found) {
-        printf("Error, did not find pointer %p that should be freed.\n", ptr);
-        return;
-    }
-
-    if (index == -1) {
-        printf("something went horribly wrong here.\n");
-        return;
-    }
-
-
-    // Store next free at pointer
-    *(freelist **) ptr = stackarray[index].freesection;
-
-    // Next free element in stack is now the object to be deleted
-    stackarray[index].freesection = ptr;
+    // Append new free space to start of free space list
+    ((freelist *) ptr)->nextFreeObject = header->parentStack->freeObjectList;
+    header->parentStack->freeObjectList = ptr;
 
 #ifdef DEBUG_FREE
     printf("\tFree successful for %p\n", ptr);
 #endif
-
 }
