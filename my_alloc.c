@@ -197,22 +197,9 @@ void *my_alloc(size_t size) {
     return object;
 }
 
-//TODO document
 void my_free(void *ptr) {
 
-#ifdef DEBUG_FREE
-    printf("First block before free:\n");
-#endif
-
     // Size of object to be deleted
-    // TODO LSB should ALWAYS be 0 here, but it isn't. Seems to be a bug in alloc (forgot to unset LSB?).
-    //  It shouldn't be necessary to call realSize here.
-    //  Or maybe it works? Pls report bug if you see this debug message.
-    //  https://github.com/ottojo/SS1_MemoryManagement/issues/new
-    if (headerOf(ptr)->tailingObjectSize & 1) {
-        printf("[FREE] Called for %p, but it is marked as empty...\n", ptr);
-        exit(13);
-    }
     int objectSize = realSize(headerOf(ptr)->tailingObjectSize);
     // Size of resulting free space
     int totalFreeSize = objectSize;
@@ -221,8 +208,7 @@ void my_free(void *ptr) {
     printf("[FREE] Free called for %p (object size %d)\n", ptr, objectSize);
 #endif
 
-    // Concat tailing
-    // TODO: make sure that is REALLY free?
+    // Combine tailing free space
     if (footerOf(ptr)->tailingObjectSize & 1) {
         // Tailing object is also empty
 
@@ -231,17 +217,14 @@ void my_free(void *ptr) {
                realSize(footerOf(ptr)->tailingObjectSize));
 #endif
 
-
         int tailingObjectSize = realSize(footerOf(ptr)->tailingObjectSize);
-
         totalFreeSize = objectSize + sizeof(header) + tailingObjectSize;
+
         void *objectToConcat = ptr + objectSize + sizeof(header);
+
 #ifdef DEBUG_FREE
         printf("[FREE] Concatenating free space behind (object %p).\n", objectToConcat);
 #endif
-        // TODO this free space is not deleted
-        //  Prev seemst to be the large remaining space at the end
-        //  fixed?
 
         // Delete references to tailing free space
 
@@ -279,10 +262,8 @@ void my_free(void *ptr) {
         }
     }
 
-    // Concat preceding
+    // Concat preceding (more or less same as above)
     if (headerOf(ptr)->precedingObjectSize & 1) {
-
-
         int precedingObjectSize = realSize(headerOf(ptr)->precedingObjectSize);
         totalFreeSize += precedingObjectSize + sizeof(header);
 
@@ -332,15 +313,11 @@ void my_free(void *ptr) {
     }
 #ifdef DEBUG_FREE
     printf("[FREE] Inserting free space in list (bucket %d)\n", index);
-    printf("[FREE] buckets[%d] comes after current (%p)\n", index, ptr);
 #endif
     ((freeSpaceListElement *) ptr)->next = buckets[index];
-    buckets[index] = ptr;   //
-    headerOf(ptr)->tailingObjectSize = (uint32_t) (totalFreeSize | 1);
-    footerOf(ptr)->precedingObjectSize = (uint32_t) (totalFreeSize | 1);
+    buckets[index] = ptr;
 
 #ifdef DEBUG_FREE
-    printf("[FREE] Done. Current block after free:\n");
-    //  printCurrent(currentBlock);
+    printf("[FREE] Done.\n");
 #endif
 }
