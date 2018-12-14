@@ -1,27 +1,323 @@
 #include <stdlib.h>
+#include <stdio.h>
+#include <stdint.h>
+
 #include "my_alloc.h"
 #include "my_system.h"
 
-static size_t offset = 0;
-static char* data = 0;
+#define NUMBER_OF_BUCKETS 32
 
-/* Trivialimplementierung, die Speicher nicht re-cycle-t
-   und auf das Alignment keine Ruecksicht nimmt
-*/
+typedef void page;
+
+typedef struct freeSpaceListElement {
+    struct freeSpaceListElement *next;
+} freeSpaceListElement;
+
+// Bucket contains linked list of free spaces of size 8 * (n + 1)
+// Last bucket may contain larger free spaces.
+freeSpaceListElement *buckets[NUMBER_OF_BUCKETS];
+
+//#define DEBUG
+
+#ifdef DEBUG
+#define DEBUG_PAGE_INIT
+#define DEBUG_ALLOC
+#define DEBUG_GETBLOCK
+#define DEBUG_FREE
+#endif
+// Header of 0: end of page
+#define END_OF_PAGE 0
+// Footer of 0: start of page
+#define START_OF_PAGE 0
+// LSB == 1: space not occupied
+typedef struct header {
+    uint32_t tailingObjectSize;  // Footer of preceding object
+    uint32_t precedingObjectSize;  // Header of following object
+} header;
+
+header *headerOf(void *object) {
+    return object - sizeof(header);
+}
+
+// Removes occupancy information from header if present
+uint32_t realSize(uint32_t s) {
+    return ~(~s | (uint32_t) 1);
+}
+
+header *footerOf(void *object) {
+    return object + realSize(headerOf(object)->tailingObjectSize);
+}
+
+/**
+ * Initializes page with header + footer
+ * @return Pointer to start (header) of initialized page
+ */
+page *initNewPage() {
+    void *ret = get_block_from_system();
+
+#if defined(DEBUG_PAGE_INIT) || defined(DEBUG_GETBLOCK)
+    printf("[PAGE INIT] New block: %p (Size: %d)\n", ret, BLOCKSIZE);
+#endif
+
+
+    if (!ret) {
+        puts("\033[92m[ERROR] --> initNewPage: OUT OF MEMORY\033[0m");
+        exit(1);
+    }
+
+    //Header an den Anfang der Page setzen
+    header *head = headerOf(ret + sizeof(header));
+    head->tailingObjectSize = (BLOCKSIZE - 2 * sizeof(header)) | 1;
+    head->precedingObjectSize = START_OF_PAGE;
+
+    //"Footer" (header verwendet als Footer) an den Ende der Page setzen
+    header *foot = footerOf(ret + sizeof(header));
+    foot->precedingObjectSize = head->tailingObjectSize;
+    foot->tailingObjectSize = END_OF_PAGE;
+
+    //  printf("Writing 0 to %p\n", ((freeSpaceListElement *) (ret + sizeof(header))));
+    ((freeSpaceListElement *) (ret + sizeof(header)))->next = 0;
+
+#ifdef DEBUG_PAGE_INIT
+    printf("[PAGE INIT] Done init page for objectsize %d.\n", head->tailingObjectSize);
+#endif
+
+    return ret;
+}
 
 void init_my_alloc() {
 }
 
-void* my_alloc(size_t size) {
-   char* ret;
-   if (!data || offset + size > BLOCKSIZE) {
-      offset = 0;
-      data = get_block_from_system();
-   }
-   ret = data + offset;
-   offset += size;
-   return ret;
+void *my_alloc(size_t size) {
+#ifdef DEBUG_ALLOC
+    printf("\033[96m[ALLOC] Allocating %ld bytes\n\033[0m", size);
+#endif
+
+    // Use the first free space large enough to fit the required size.
+    // Insert remaining space in corresponding list (bucket)
+
+    // Pointer to allocated space
+    void *object = 0;
+
+    // Search all buckets (beginning with smallest usable size) for one that has a free space:
+    int i = (int) ((size >> 3) - 1);
+    while (i < NUMBER_OF_BUCKETS - 1 && buckets[i] == 0) {
+        ++i;
+    }
+
+    object = buckets[i];
+
+    if (object == 0) {
+        // Did not find a space large enough.
+        // New Page
+
+#ifdef DEBUG_ALLOC
+        printf("[ALLOC] Did not find space. Requesting new page.\n");
+#endif
+
+        void *newPage = initNewPage();
+
+        buckets[NUMBER_OF_BUCKETS - 1] = newPage + sizeof(header);
+        buckets[NUMBER_OF_BUCKETS - 1]->next = 0;
+        object = buckets[NUMBER_OF_BUCKETS - 1];
+    }
+
+    header *objectHeader = headerOf(object);
+    header *objectFooter;
+
+    // We may have a space that is larger than what we need
+    int availableObjectSize = realSize(objectHeader->tailingObjectSize);
+
+#ifdef DEBUG_ALLOC
+    printf("[ALLOC] Found free space with objectsize %d in bucket %d at %p.\n", availableObjectSize, i, object);
+#endif
+
+    // Remove that free space from the corresponding list
+    buckets[i] = ((freeSpaceListElement *) object)->next;
+
+#ifdef DEBUG_ALLOC
+    printf("[ALLOC] Removed space from free list. bucket[%d]=%p\n", i, buckets[i]);
+#endif
+
+    // Set header + footer of new object
+    objectHeader->tailingObjectSize = (uint32_t) size;
+    objectFooter = footerOf(object);
+    objectFooter->precedingObjectSize = (uint32_t) size;
+
+    // Maybe there was more space than we need
+    if (availableObjectSize == size + sizeof(header)) {
+
+        // The remaining free space would not fit an actual object, just its header.
+        // These 8 bytes are wasted, but 0 size objects are not possible currently (size 0 <=> end/start of block)
+
+#ifdef DEBUG_ALLOC
+        printf("[ALLOC] Allocating 8 byte more.\n");
+#endif
+
+        objectHeader->tailingObjectSize = (uint32_t) (size + sizeof(header));
+        // Footer is now somewhere else
+        objectFooter = footerOf(object);
+        objectFooter->precedingObjectSize = (uint32_t) (size + sizeof(header));
+    } else if (availableObjectSize > size + sizeof(header)) {
+        // Space for another object is remaining
+
+        void *nextObject = object + size + sizeof(header);
+        uint32_t remainingObjectSpace = (uint32_t) (availableObjectSize - size - sizeof(header));
+
+#ifdef DEBUG_ALLOC
+        printf("[ALLOC] There are %d bytes of object space left at %p.\n", remainingObjectSpace, nextObject);
+#endif
+        header *nextObjectHeader = objectFooter;
+        nextObjectHeader->tailingObjectSize = remainingObjectSpace | 1;
+        header *nextObjectFooter = footerOf(nextObject);
+        nextObjectFooter->precedingObjectSize = remainingObjectSpace | 1;
+
+#ifdef DEBUG_ALLOC
+        printf("[ALLOC] Initialized free space (Header at %p, Footer at %p).\n", nextObjectHeader, nextObjectFooter);
+#endif
+
+        // Put that free space in the correct list (at the start)
+        int remainingSpaceIndex = (remainingObjectSpace / 8) - 1;
+        if (remainingSpaceIndex >= NUMBER_OF_BUCKETS) {
+            remainingSpaceIndex = NUMBER_OF_BUCKETS - 1;
+        }
+        ((freeSpaceListElement *) nextObject)->next = buckets[remainingSpaceIndex];
+        buckets[remainingSpaceIndex] = nextObject;
+
+#ifdef DEBUG_ALLOC
+        printf("[ALLOC] Free space (%p) has been put into bucket %d.\n", nextObject, remainingSpaceIndex);
+#endif
+    }
+
+
+#ifdef DEBUG_ALLOC
+    printf("[ALLOC] Allocated address %p for size %d\n", object, headerOf(object)->tailingObjectSize);
+#endif
+
+    return object;
 }
 
-void my_free(void* ptr) {
+void my_free(void *ptr) {
+
+    // Size of object to be deleted
+    int objectSize = realSize(headerOf(ptr)->tailingObjectSize);
+    // Size of resulting free space
+    int totalFreeSize = objectSize;
+
+#ifdef DEBUG_FREE
+    printf("[FREE] Free called for %p (object size %d)\n", ptr, objectSize);
+#endif
+
+    // Combine tailing free space
+    if (footerOf(ptr)->tailingObjectSize & 1) {
+        // Tailing object is also empty
+
+#ifdef DEBUG_FREE
+        printf("[FREE] There is free space (object size %d) behind object.\n",
+               realSize(footerOf(ptr)->tailingObjectSize));
+#endif
+
+        int tailingObjectSize = realSize(footerOf(ptr)->tailingObjectSize);
+        totalFreeSize = objectSize + sizeof(header) + tailingObjectSize;
+
+        void *objectToConcat = ptr + objectSize + sizeof(header);
+
+#ifdef DEBUG_FREE
+        printf("[FREE] Concatenating free space behind (object %p).\n", objectToConcat);
+#endif
+
+        // Delete references to tailing free space
+
+        // Should be in this bucket
+        int bucketToSearch = (tailingObjectSize / 8) - 1;
+        if (bucketToSearch >= NUMBER_OF_BUCKETS) {
+            bucketToSearch = NUMBER_OF_BUCKETS - 1;
+        }
+
+        freeSpaceListElement *test = buckets[bucketToSearch];
+        freeSpaceListElement *prev = 0;
+
+        // TODO: instead of iterating through list, build doubly linked list
+
+        while (test != objectToConcat && test) {
+            prev = test;
+            test = test->next;
+        }
+
+#ifdef DEBUG_FREE
+        printf("Found this pointer in list, the previous element in list is %p.\n", prev);
+#endif
+
+        if (prev == 0) {
+            // objectToConcat is buckets[i]
+#ifdef DEBUG_FREE
+            printf("[FREE] Object to concat is bucket[%d] (first element in list).\n", bucketToSearch);
+#endif
+            buckets[bucketToSearch] = buckets[bucketToSearch]->next;
+        } else {
+#ifdef DEBUG_FREE
+            printf("[FREE] Removing object from list.\n");
+#endif
+            prev->next = ((freeSpaceListElement *) objectToConcat)->next;
+        }
+    }
+
+    // Concat preceding (more or less same as above)
+    if (headerOf(ptr)->precedingObjectSize & 1) {
+        int precedingObjectSize = realSize(headerOf(ptr)->precedingObjectSize);
+        totalFreeSize += precedingObjectSize + sizeof(header);
+
+#ifdef DEBUG_FREE
+        printf("[FREE] There is free space (object size %d) before object.\n",
+               precedingObjectSize);
+#endif
+
+        // 1. move ptr back
+        ptr -= precedingObjectSize + sizeof(header);
+
+        // 2. Delete references to preceding free space
+
+        // Should be in this bucket
+        int bucketToSearch = (precedingObjectSize / 8) - 1;
+        if (bucketToSearch >= NUMBER_OF_BUCKETS) {
+            bucketToSearch = NUMBER_OF_BUCKETS - 1;
+        }
+
+        freeSpaceListElement *test = buckets[bucketToSearch];
+        freeSpaceListElement *prev = 0;
+
+        // TODO: instead of iterating through list, build doubly linked list
+
+        // FInd previous element in list
+        while (test != ptr && test) {
+            prev = test;
+            test = test->next;
+        }
+
+        if (prev == 0) {
+            // objectToConcat is buckets[i] (first element in list)
+            buckets[bucketToSearch] = buckets[bucketToSearch]->next;
+        } else {
+            prev->next = ((freeSpaceListElement *) ptr)->next;
+        }
+    }
+
+    // expand free object
+    headerOf(ptr)->tailingObjectSize = (uint32_t) totalFreeSize | 1;
+    footerOf(ptr)->precedingObjectSize = (uint32_t) totalFreeSize | 1;
+
+    // Now that we have concatenated, insert new free space into appropriate list (at the start because why not)
+    int index = (totalFreeSize / 8) - 1;
+    if (index >= NUMBER_OF_BUCKETS) {
+        index = NUMBER_OF_BUCKETS - 1;
+    }
+#ifdef DEBUG_FREE
+    printf("[FREE] Inserting free space in list (bucket %d)\n", index);
+#endif
+    ((freeSpaceListElement *) ptr)->next = buckets[index];
+    buckets[index] = ptr;
+
+#ifdef DEBUG_FREE
+    printf("[FREE] Done.\n");
+#endif
 }
