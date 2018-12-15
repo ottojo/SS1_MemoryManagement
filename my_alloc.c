@@ -9,18 +9,19 @@
 #define MIN_PAGE_DIFF 24
 
 //Notwendig für die Umsetzung des Konzepts des Binnings
-static void* buckets[NUMBER_OF_BUCKETS];
+static void** buckets[NUMBER_OF_BUCKETS];
 
 // #define DEBUG_INIT
 // #define DEBUG_PAGE_INIT
-#define DEBUG_ALLOC
-#define DEBUG_EXTRACT
-#define DEBUG_BLOCK
+// #define DEBUG_ALLOC
+// #define DEBUG_EXTRACT
+// #define DEBUG_BLOCK
 // #define DEBUG_GETBLOCK
-#define DEBUG_FREE
+// #define DEBUG_FREE
 
 #ifdef DEBUG_BLOCK
-	void* block;
+	void* block[100];
+	uint8_t blockCounter = 0;
 #endif
 
 typedef struct header {
@@ -32,15 +33,15 @@ typedef struct header {
 typedef struct combinedHeaders {
 	header *frontHeader;
 	header *tailHeader;
-	void *next;
-	void *prev;
+	void **next;
+	void **prev;
 } combinedHeaders;
 
 //Verwendete Hilfsmethoden
-void* initNewBlock();
-combinedHeaders extractHeaderData(void*);				//Extrahiert Header-Daten (auch RestHeader von umliegenden Elementen)
+void** initNewBlock();
+combinedHeaders extractHeaderData(void**);				//Extrahiert Header-Daten (auch RestHeader von umliegenden Elementen)
 #ifdef DEBUG_BLOCK
-	void printBlock(uint32_t*, uint32_t);
+	void printBlocks();
 #endif
 
 
@@ -79,41 +80,32 @@ void* my_alloc(size_t size) {
 		printf("\033[96m\n[ALLOC] Allokiere: %ld\n\033[0m", size);
 	#endif
 	
-	void *ret;
-	uint8_t pos = (size / 8) - 1;
+	void *ret = NULL;
+	uint8_t pos = (size >> 3) - 1;
 	
 	//Überprüfe, ob im entsprechenden Fach der geforderten Größe noch Speicher vorhanden ist
 	if(buckets[pos]) {
 		#ifdef DEBUG_ALLOC 
 			printf("\033[96m[ALLOC] Feld vorhanden in Bucket %d\n\033[0m", pos);
 		#endif
-		
-		ret = buckets[pos];
-		puts("H1");
+
+		ret = (void*)buckets[pos];
 		//Hier könnte eine Methode eingesetzt werden, welche den prev Zeiger nicht ausliest --> minimaler Effizienzgewinn
-		combinedHeaders headers = extractHeaderData(ret);
-		puts("H2");
+		combinedHeaders headers = extractHeaderData((void**)ret);
 		//Flags für freie Felder entfernen
 		headers.frontHeader->headSize -= 1;
 		headers.tailHeader->tailSize -= 1;
-		puts("H3");
 		//Feld aus Liste entfernen
-		buckets[pos] = headers.next;
-		puts("H4");
-		printf("pos: %p\n", headers.next);
+		buckets[pos] = *headers.next;
+		
 		if(pos > 0) {
 			//>8 Byte Datensegment --> doppelt verkettete Liste
 			//--> prev Zeiger im nächsten Element muss auf null gesetzt werden
 			//Beim 8 Byte Datensegment entfällt dies, da die Liste hier mangels Platz nur einfach verkettet ist
-			if(headers.next) {
-				puts("H5a");
-				*((void**)(headers.next)) = NULL;
-				puts("H5b");
-			} else {
-				puts("H6");
+			if(headers.next && *headers.next) {
+				*headers.next = NULL;
 			}
 		}
-		puts("H7");
 	} else {
 		//Kein freies Feld in gesuchter Größe vorhanden
 		#ifdef DEBUG_ALLOC 
@@ -162,10 +154,10 @@ void* my_alloc(size_t size) {
 						printf("\033[96m\t\t--> Abspalten lohnt sich!\n\033[0m");
 					#endif
 					
-					ret = buckets[NUMBER_OF_BUCKETS - 1];
+					ret = (void*)buckets[NUMBER_OF_BUCKETS - 1];
 					
 					//Mittelheader einbauen
-					header *middleHeader = (header*)((buckets[NUMBER_OF_BUCKETS - 1]) + size);
+					header *middleHeader = (header*)((buckets[NUMBER_OF_BUCKETS - 1]) + (size >> 3));
 					
 					//printf("Middle: %p\n", middleHeader);
 					
@@ -177,7 +169,7 @@ void* my_alloc(size_t size) {
 					headers.tailHeader->tailSize = middleHeader->headSize;
 					
 					if(middleHeader->headSize <= 256) {
-						uint8_t insertPos = (((middleHeader->headSize - 1)) / 8) - 1;
+						uint8_t insertPos = ((middleHeader->headSize - 1) >> 3) - 1;
 						
 						//Prev Zeiger im Rest des Blocks auf NULL setzen
 						*(void**)((void*)middleHeader + 2*sizeof(uint32_t)) = NULL;
@@ -191,7 +183,7 @@ void* my_alloc(size_t size) {
 						buckets[insertPos] = ((void*)(middleHeader) + 2*sizeof(uint32_t));
 						
 						#ifdef DEBUG_ALLOC 
-							printf("\033[96m[ALLOC] Page-Rest eingeordnet bei %d (Size: %d)\n\033[0m", ((middleHeader->headSize - 1) / 8) - 1, middleHeader->headSize - 1);
+							printf("\033[96m[ALLOC] Page-Rest eingeordnet bei %d (Size: %d)\n\033[0m", ((middleHeader->headSize - 1) >> 3) - 1, middleHeader->headSize - 1);
 						#endif
 						
 						buckets[NUMBER_OF_BUCKETS - 1] = NULL;
@@ -219,10 +211,14 @@ void* my_alloc(size_t size) {
 		}
 	}
 	
+	#ifdef DEBUG_BLOCK
+		printBlocks();
+	#endif
+	
 	return ret;
 }
 
-void my_free(void* ptr) {
+void my_free(void* ptr) {	
 	//Triviale Implementierung, lediglich einhängen in Liste
 	#ifdef DEBUG_FREE 
 		printf("\033[32m[FREE] Freeing %p\n\033[0m", ptr); 
@@ -230,7 +226,7 @@ void my_free(void* ptr) {
 	
 	combinedHeaders headers = extractHeaderData(ptr);
 
-	// uint8_t insertPos = (((headers.frontHeader->headSize)) / 8) - 1;
+	// uint8_t insertPos = (((headers.frontHeader->headSize)) >> 3) - 1;
 	uint8_t insertPos = (((headers.frontHeader->headSize)) >> 3) - 1;
 	
 	//Feld als frei markieren
@@ -240,16 +236,24 @@ void my_free(void* ptr) {
 	//Prev Zeiger einzufügenden Feld auf NULL setzen
 	*((void**)ptr) = NULL;
 	
+	// printf("Prev NULL %p\n", *((void**)ptr));
+	
 	//Falls nachfolgendes Element vorhanden (und länger als 1 Byte) prev Zeiger setzen
 	if(buckets[insertPos] && insertPos != 0) {
 		*((void**)buckets[insertPos]) = ptr;
 	}
 	
-	headers.next = buckets[insertPos];
+	*headers.next = buckets[insertPos];
+	
+	// headers.next ? printf("Next set *: %p\n", *headers.next) : printf("Next set: %p\n", headers.next);
 	buckets[insertPos] = ptr;
 	
 	#ifdef DEBUG_FREE 
 		printf("\033[32m[FREE] Element eingeordnet bei %d (Size: %d)\n\033[0m", insertPos, headers.frontHeader->headSize - 1);
+	#endif
+	
+	#ifdef DEBUG_BLOCK
+		printBlocks();
 	#endif
 }
 
@@ -257,11 +261,11 @@ void my_free(void* ptr) {
 Methode zum Vorbereiten einer neuen Page (setzen von richtigem Header und Footer).
 Die Page erhält keine next oder prev Zeiger, da immer nur eine einzige Page verwaltet werden soll.
 */
-void* initNewBlock() {
-	void* ret = get_block_from_system();
+void** initNewBlock() {
+	void** ret = (void**)get_block_from_system();
 	
 	#ifdef DEBUG_BLOCK
-		block = ret;	
+		block[blockCounter++] = (void*)ret;	
 	#endif	
 	
 	#ifdef DEBUG_PAGE_INIT
@@ -279,21 +283,25 @@ void* initNewBlock() {
 	head->headSize = BLOCKSIZE - 4* sizeof(uint32_t) + 1;	//+1 als Flag für freies Feld
 	
 	//"Footer" (header verwendet als Footer) an das Ende der Page setzen
-	head = ((header*)(ret + BLOCKSIZE - 2*sizeof(uint32_t))); //+1 als Flag für freies Feld
+	head = ((header*)((void*)ret + BLOCKSIZE - 2*sizeof(uint32_t))); //+1 als Flag für freies Feld
 	head->tailSize = BLOCKSIZE - 4*sizeof(uint32_t) + 1;
-	head->headSize = 0;
+	head->headSize = 0;	
 	
 	#ifdef DEBUG_PAGE_INIT
 		printf("\033[90m[PAGE INIT] Header und Footer erstellt (Footer-pos: %p, Nutzgroesse: %d)\n\033[0m", head, head->tailSize - 1); 
 	#endif
 	
-	ret += 2*sizeof(uint32_t);			//Zeiger hinter Header-Paket verschieben
+	ret ++;			//Zeiger hinter Header-Paket verschieben (--> verschieben um 8 Byte (entspricht Pointergröße))
 	
 	//Eventuell überflüssig
-	*(void**)ret = 0;
+	// *(void**)ret = NULL;
 	
 	#ifdef DEBUG_PAGE_INIT
 		printf("\033[90m[PAGE INIT] Zeiger verschoben: %p\n\033[0m", ret); 
+	#endif
+	
+	#ifdef DEBUG_BLOCK
+		printBlocks();
 	#endif
 	
 	return ret;
@@ -303,135 +311,85 @@ void* initNewBlock() {
 Methode zum Extrahieren der beiden Header um das Datenpaket herum. Ausgelesen werden sollen dabei eigentlich auch die
 Zeiger next und prev, aber dies funktioniert aktuell noch nicht. 
 */
-combinedHeaders extractHeaderData(void *ptr) {
-	#ifdef DEBUG_BLOCK
-		printBlock((uint32_t*)block, BLOCKSIZE);
-	#endif
+combinedHeaders extractHeaderData(void **ptr) {
+	// #ifdef DEBUG_BLOCK
+		// printBlocks();
+	// #endif
 
 	combinedHeaders headers;
 	
-	headers.frontHeader = (header*)(ptr - 2*sizeof(uint32_t));
+	headers.frontHeader = (header*)((void*)ptr - 2*sizeof(uint32_t));
 	
 	if((headers.frontHeader->headSize & 0x01)) {
 		//Feld ist frei
-		headers.tailHeader = (header*)(ptr + (headers.frontHeader->headSize & 0xfffe));
-		
+		headers.tailHeader = (header*)((void*)ptr + (headers.frontHeader->headSize & 0xfffe));
 		//Nur falls nicht von der Page gelesen wird (da immer nur eine Page gehalten wird sind die Pointer hier immer NULL)
-		if(headers.frontHeader->headSize >= 256) {
-			headers.next = *((void**)headers.tailHeader - sizeof(void*));
-			headers.prev = *(void**)ptr;
+		if(headers.frontHeader->headSize <= 257) {
+			headers.next = (void**)((void*)headers.tailHeader - sizeof(void*));
+			headers.prev = ptr;
 		} else {			//Ist dieses else überhaupt notwendig???
-			headers.next = NULL;
-			headers.prev = NULL;
+			headers.next = (void**)NULL;
+			headers.prev = (void**)NULL;
 		}
 	} else {
-		headers.tailHeader = (header*)(ptr + (headers.frontHeader->headSize));
+		headers.tailHeader = (header*)((void*)ptr + headers.frontHeader->headSize);
+		headers.prev = ptr;
+		// headers.next = (void**)((void*)headers.tailHeader - sizeof(void*));
+		headers.next = (void**)((void*)headers.tailHeader - sizeof(void*));
 	}
 	
 	#ifdef DEBUG_EXTRACT
-		printf("\033[34m[EXTRACT] front: %d | %d\t back: %d | %d\n\033[0m\tprev: %p | next: %p\n", headers.frontHeader->tailSize, headers.frontHeader->headSize, headers.tailHeader->tailSize, headers.tailHeader->headSize, headers.prev, headers.next);
+		if(headers.next && headers.prev) {
+			printf("\033[34m[EXTRACT] front: %d | %d\t back: %d | %d\t*prev: %p | *next: %p\n\033[0m", headers.frontHeader->tailSize, headers.frontHeader->headSize, headers.tailHeader->tailSize, headers.tailHeader->headSize, *headers.prev, *headers.next);
+		} else {
+			printf("\033[34m[EXTRACT] front: %d | %d\t back: %d | %d\tprev: %p | next: %p\n\033[0m", headers.frontHeader->tailSize, headers.frontHeader->headSize, headers.tailHeader->tailSize, headers.tailHeader->headSize, NULL, NULL);		
+		}
 	#endif
 	
 	return headers;
 }
 
 #ifdef DEBUG_BLOCK
-void printBlock(uint32_t *ptr, uint32_t length) {
-	length /= sizeof(uint32_t);
+void printBlocks() {
+	uint32_t length = BLOCKSIZE / sizeof(uint32_t);
 	
 	//printf("Start: %p\t length: %d\n", ptr, length);
-	printf("############## BLOCK MAP ######################");
+	printf("############## BLOCK MAP ######################\n");
 	
-	// Primitiv
-	// for(uint32_t i = 0; i < length; i++, ptr++) {
-		// if(i % 16 == 0) {
-			// printf("\n%5d: ", i);
-		// }
-		
-		// if(!(*ptr & 0xFFFF0000) && *ptr != 0) { 
-			// printf("\033[32m%011d \033[0m", *ptr);
-		// } else {
-			// printf("%011d ", *ptr);
-		// }
-	// }
-	
-	uint32_t firstPointer = 9000, secondPointer = 9000;
-	bool used = false;
-	printf("\n    0: \033[32m%07d \033[0m", *ptr++);
-	for(uint32_t i = 1; i < length - 1; i++, ptr++) {
-		if(i % 28 == 0) {
-			printf("\n%5d: ", i);
-		}
-		
-		if(i == firstPointer || i == secondPointer) {
-			printf("\033[36m%15p \033[0m", (void*)ptr);
-			i ++;
-			ptr++;
-			if(i % 28 == 0) {
+	for(uint8_t z = 0; z < blockCounter; z++) {
+		printf("Block %d:\n", z);
+		uint32_t *ptr = (uint32_t*)block[z];
+		uint32_t firstPointer = BLOCKSIZE + 5, secondPointer = BLOCKSIZE + 5;
+		bool used = false;
+		printf("\n    0: \033[32m%09d \033[0m", *ptr++);
+		for(uint32_t i = 1; i < length - 1; i++, ptr++) {
+			if(i % 20 == 0) {
 				printf("\n%5d: ", i);
 			}
-		} else {
-			if(!(*ptr & 0xFFFF0000) && *ptr != 0) { 
-				printf("\033[32m%07d \033[0m", *ptr);
-				used = !(*ptr & 0x01);
-				if(((uintptr_t)ptr & 7) && !used) {
-					firstPointer = i + 1;
-					secondPointer = i + *ptr/sizeof(uint32_t) - 1;
+			
+			if(i == firstPointer || i == secondPointer) {
+				printf("\033[36m%19p \033[0m", *(void**)ptr);
+				i ++;
+				ptr++;
+				if(i % 20 == 0) {
+					printf("\n%5d: ", i);
 				}
 			} else {
-				// printf("%07d ", *ptr);
-				used ? printf("||||||| ") : printf("------- ");
+				if(!(*ptr & 0xFFFF0000) && *ptr != 0) { 
+					printf("\033[32m%09d \033[0m", *ptr);
+					used = !(*ptr & 0x01);
+					if(((uintptr_t)ptr & 7) && !used) {
+						firstPointer = i + 1;
+						secondPointer = i + *ptr/sizeof(uint32_t) - 1;
+					}
+				} else {
+					// printf("%07d ", *ptr);
+					used ? printf("||||||||| ") : printf("--------- ");
+				}
 			}
 		}
+		printf("\033[32m%09d\033[0m \n\n", *ptr);
 	}
-	printf("\033[32m%07d\033[0m \n", *ptr);
-	
-	// uint32_t headSize;
-	
-	// printf("\n\n%5d: %07d ", 0, *ptr++);
-	// for(uint32_t i = 1; i < length; i++) {
-		// headSize = *ptr;
-		// printf("\033[32m%07d \033[0m", headSize);
-		// i++;
-		// ptr++;
-		
-		// if(i % 26 == 0) {
-			// printf("\n%5d: ", i);
-		// }
-		
-		// //Nächste zwei Felder als Pointer interpretieren --> geht davon aus, dass die Header Struktur passt
-		// printf("%p  ", (void*)ptr);
-		
-		// for(uint8_t a = 1; a < 3; a++) {
-			// if(*(ptr + a) == headSize) {
-				// printf("%07d ", *ptr);
-				// break;
-			// }
-		// }
-		
-		
-		// ptr += 2; i+= 2;
-		// while(*(ptr + 2) != headSize && i < length) {
-			// printf("%07d %07d ", *ptr, *(ptr + 1));
-			// ptr += 2;
-			// i += 2;
-			
-			// if(i % 26 == 0) {
-				// printf("\n%5d: ", i);
-			// }
-		// }
-		
-		// printf("%p  ", (void*)ptr);
-		// ptr++;
-		// i++;
-		
-		// if(i % 26 == 0) {
-			// printf("\n%5d: ", i);
-		// }
-	// }
-	
-	
-	
 	printf("\n############## BLOCK MAP ######################\n");
 }
 #endif
