@@ -140,7 +140,7 @@ void removeFreeSpaceFromList(doublePointer *p) {
     }
 }
 
-#ifdef DEGUB_USED
+#ifdef DEBUG_USED
 void printUsed() {
     printf("Used: %f%%\n", 100 * (double) sumUsed / sumAvailiable);
 }
@@ -153,7 +153,7 @@ void printUsed() {
 page *initNewPage() {
     void *ret = get_block_from_system();
 
-#ifdef DEGUB_USED
+#ifdef DEBUG_USED
     sumAvailiable += BLOCKSIZE;
 #endif
 
