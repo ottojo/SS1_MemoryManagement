@@ -46,14 +46,16 @@ spaceHeader *headerOf(void *objectLocation) {
 }
 
 void init_my_alloc() {
+}
 
-    //TODO
-    //  Get first block on first allocation, not on init
 
-#ifdef DEBUG_INIT
-    printf("Initializing.\n");
+void *my_alloc(size_t size) {
+#ifdef DEBUG_ALLOC
+    printf("Allocating space for object of size %ld.\n", size);
 #endif
-    for (int i = 0; i < NR_STACKS; i++) {
+
+    int i = (int) ((size >> 3) - 1);
+    if (stackarray[i].currentblock == 0) {
 #ifdef DEBUG_INIT
         printf("Initializing stack %d for objects sized %d.\n", i, (i + 1) * 8);
 #endif
@@ -69,16 +71,6 @@ void init_my_alloc() {
         // Next free space is last known space
         stackarray[i].freeObjectList->nextFreeObject = 0;
     }
-#ifdef DEBUG_INIT
-    printf("Done.\n");
-#endif
-}
-
-
-void *my_alloc(size_t size) {
-#ifdef DEBUG_ALLOC
-    printf("Allocating space for object of size %ld.\n", size);
-#endif
 
     // index = size/8 - 1
     stack *currentStack = &stackarray[(size >> 3) - 1];
