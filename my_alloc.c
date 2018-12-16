@@ -18,6 +18,8 @@ static void** buckets[NUMBER_OF_BUCKETS];
 // #define DEBUG_BLOCK
 // #define DEBUG_GETBLOCK
 // #define DEBUG_FREE
+// #define DEBUG_BUCKETS
+#define COLOURED
 
 #ifdef DEBUG_BLOCK
 	void* block[100];
@@ -44,6 +46,10 @@ combinedHeaders extractHeaderData(void**);				//Extrahiert Header-Daten (auch Re
 	void printBlocks();
 #endif
 
+#ifdef DEBUG_BUCKETS
+	void printBuckets();
+#endif
+
 
 /* 
 	Erster Versuch einer Speicherverwaltung, verwendete Konzepte: Header und Footer sowie Binning 
@@ -61,7 +67,11 @@ combinedHeaders extractHeaderData(void**);				//Extrahiert Header-Daten (auch Re
 
 void init_my_alloc() {
 	#ifdef DEBUG_INIT
-		printf("\033[95m[INIT] Initialisiere.\n\033[0m");
+		#ifdef COLOURED
+			printf("\033[95m[INIT] Initialisiere.\n\033[0m");
+		#else 
+			printf("[INIT] Initialisiere.\n");
+		#endif
 	#endif
 	
 	for(uint8_t i = 0; i < NUMBER_OF_BUCKETS - 1; i++) {
@@ -71,13 +81,25 @@ void init_my_alloc() {
 	buckets[NUMBER_OF_BUCKETS - 1] = initNewBlock();
 	
 	#ifdef DEBUG_INIT
-		printf("\033[95m[INIT] Initialisierung beendet.\n\033[0m");
+		#ifdef COLOURED
+			printf("\033[95m[INIT] Initialisierung beendet.\n\033[0m");
+		#else 
+			printf("[INIT] Initialisierung beendet.\n");
+		#endif
 	#endif
 }
 
 void* my_alloc(size_t size) {
 	#ifdef DEBUG_ALLOC 
-		printf("\033[96m\n[ALLOC] Allokiere: %ld\n\033[0m", size);
+		#ifdef COLOURED
+			printf("\033[96m\n[ALLOC] Allokiere: %ld\n\033[0m", size);
+		#else 
+			printf("\n[ALLOC] Allokiere: %ld\n", size);
+		#endif
+	#endif
+	
+	#ifdef DEBUG_BUCKETS
+		printBuckets();
 	#endif
 	
 	void *ret = NULL;
@@ -86,7 +108,11 @@ void* my_alloc(size_t size) {
 	//Überprüfe, ob im entsprechenden Fach der geforderten Größe noch Speicher vorhanden ist
 	if(buckets[pos]) {
 		#ifdef DEBUG_ALLOC 
-			printf("\033[96m[ALLOC] Feld vorhanden in Bucket %d\n\033[0m", pos);
+			#ifdef COLOURED
+				printf("\033[96m[ALLOC] Feld vorhanden in Bucket %d\n\033[0m", pos);
+			#else 
+				printf("[ALLOC] Feld vorhanden in Bucket %d\n", pos);
+			#endif
 		#endif
 
 		ret = (void*)buckets[pos];
@@ -95,52 +121,111 @@ void* my_alloc(size_t size) {
 		//Flags für freie Felder entfernen
 		headers.frontHeader->headSize -= 1;
 		headers.tailHeader->tailSize -= 1;
-		//Feld aus Liste entfernen
-		buckets[pos] = *headers.next;
-		
+
 		if(pos > 0) {
 			//>8 Byte Datensegment --> doppelt verkettete Liste
 			//--> prev Zeiger im nächsten Element muss auf null gesetzt werden
 			//Beim 8 Byte Datensegment entfällt dies, da die Liste hier mangels Platz nur einfach verkettet ist
 			if(headers.next && *headers.next) {
-				*headers.next = NULL;
+				*((void**)headers.next) = NULL;
 			}
 		}
+		
+		//Feld aus Liste entfernen		
+		buckets[pos] = *headers.next;
 	} else {
 		//Kein freies Feld in gesuchter Größe vorhanden
 		#ifdef DEBUG_ALLOC 
-			puts("\033[96m[ALLOC] Feld nicht vorhanden\033[0m");
+			#ifdef COLOURED
+				puts("\033[96m[ALLOC] Feld nicht vorhanden\033[0m");
+			#else 
+				puts("[ALLOC] Feld nicht vorhanden");
+			#endif
 		#endif
 		
 		//Überprüfe, ob größere Felder vorhanden sind
 		//--> präferiere Feld mit 2*pos + 2 (+2 wegen neuem Verwaltungssegment in der Mitte und hinten), dann liegt für 
 		// 	  nächste Anfrage ein solches Feld mit der geforderten Größe bereit
 		uint8_t divPos = 2*pos + 2;
-		if(divPos < NUMBER_OF_BUCKETS - 1 && buckets[divPos] && false) {
+		if(divPos < NUMBER_OF_BUCKETS - 1 && buckets[divPos]) {
 			#ifdef DEBUG_ALLOC 
-				printf("\033[96m[ALLOC] Praeferenzabspaltung aus bucket %d\n\033[0m", divPos);
+				#ifdef COLOURED
+					printf("\033[96m[ALLOC] Praeferenzabspaltung aus bucket %d\n\033[0m", divPos);
+				#else 
+					printf("[ALLOC] Praeferenzabspaltung aus bucket %d\n", divPos);
+				#endif
+			#endif
+			
+			combinedHeaders headers = extractHeaderData(buckets[divPos]);
+			
+			ret = (void*)buckets[divPos];
+					
+			//Mittelheader einbauen
+			header *middleHeader = (header*)((buckets[divPos]) + (size >> 3));
+					
+			middleHeader->tailSize = (uint32_t)size;
+			middleHeader->headSize = (uint32_t)(headers.frontHeader->headSize - size - 2*sizeof(uint32_t));
+					
+			//Front- und Tail-Header Felder anpassen
+			headers.frontHeader->headSize = size;
+			headers.tailHeader->tailSize = middleHeader->headSize;
+						
+			//Prev Zeiger im Rest des Blocks auf NULL setzen
+			*(void**)((void*)middleHeader + 2*sizeof(uint32_t)) = NULL;
+			
+			//Next Zeiger setzen (sicher NULL, da Präferenzabspaltung wegen Fehlen eines passenden Feldes)
+			*(void**)((void*)headers.tailHeader - sizeof(void*)) = NULL;
+			
+			//Restfeld im Bucket ablegen
+			buckets[pos] = (void**)((void*)(middleHeader) + 2*sizeof(uint32_t));
+			
+			//Im Bucket des gespaltenen Feldes aufs nächste Feld wechseln
+			buckets[divPos] = *buckets[divPos];
+			
+			#ifdef DEBUG_ALLOC 
+				#ifdef COLOURED
+					printf("\033[96m[ALLOC] Element-Rest eingeordnet bei %d (Size: %d)\n\033[0m", ((middleHeader->headSize - 1) >> 3) - 1, middleHeader->headSize - 1);
+				#else 
+					printf("[ALLOC] Element-Rest eingeordnet bei %d (Size: %d)\n", ((middleHeader->headSize - 1) >> 3) - 1, middleHeader->headSize - 1);
+				#endif
 			#endif
 		} else {
 			#ifdef DEBUG_ALLOC 
-				printf("\033[96m[ALLOC] Versuche, aus groesserem Feld abzuspalten\n\033[0m");
+				#ifdef COLOURED
+					printf("\033[96m[ALLOC] Versuche, aus groesserem Feld abzuspalten\n\033[0m");
+				#else 
+					printf("[ALLOC] Versuche, aus groesserem Feld abzuspalten\n");
+				#endif
 			#endif
 			
 			if(false) {
 				//Abspaltung von größerem Block
 				#ifdef DEBUG_ALLOC 
-					printf("\033[96m[ALLOC] Spalte von groesserem Block ab\n\033[0m");
+					#ifdef COLOURED
+						printf("\033[96m[ALLOC] Spalte von groesserem Block ab\n\033[0m");
+					#else 
+						printf("[ALLOC] Spalte von groesserem Block ab\n");
+					#endif
 				#endif
 			} else {
 				//Abspaltung von Page
 				#ifdef DEBUG_ALLOC 
-					printf("\033[96m[ALLOC] Spalte von Page ab\n\033[0m");
+					#ifdef COLOURED
+						printf("\033[96m[ALLOC] Spalte von Page ab\n\033[0m");
+					#else 
+						printf("[ALLOC] Spalte von Page ab\n");
+					#endif
 				#endif
 				
 				//Auslesen der Restgröße der Page
 				if(!buckets[NUMBER_OF_BUCKETS - 1]) {
 					//Keine Page mehr vorhanden --> neue holen
 					#ifdef DEBUG_ALLOC 
-						printf("\033[96m[ALLOC] Hole neue page\n\033[0m");
+						#ifdef COLOURED
+							printf("\033[96m[ALLOC] Hole neue page\n\033[0m");
+						#else 
+							printf("[ALLOC] Hole neue page\n");
+						#endif
 					#endif
 					buckets[NUMBER_OF_BUCKETS - 1] = initNewBlock();
 				}
@@ -151,7 +236,11 @@ void* my_alloc(size_t size) {
 				if(headers.frontHeader->headSize >= size + MIN_PAGE_DIFF) {
 					//Abspalten lohnt sich
 					#ifdef DEBUG_ALLOC 
-						printf("\033[96m\t\t--> Abspalten lohnt sich!\n\033[0m");
+						#ifdef COLOURED
+							printf("\033[96m\t\t--> Abspalten lohnt sich!\n\033[0m");
+						#else 
+							printf("\t\t--> Abspalten lohnt sich!\n");
+						#endif
 					#endif
 					
 					ret = (void*)buckets[NUMBER_OF_BUCKETS - 1];
@@ -183,20 +272,32 @@ void* my_alloc(size_t size) {
 						buckets[insertPos] = ((void*)(middleHeader) + 2*sizeof(uint32_t));
 						
 						#ifdef DEBUG_ALLOC 
-							printf("\033[96m[ALLOC] Page-Rest eingeordnet bei %d (Size: %d)\n\033[0m", ((middleHeader->headSize - 1) >> 3) - 1, middleHeader->headSize - 1);
+							#ifdef COLOURED
+								printf("\033[96m[ALLOC] Page-Rest eingeordnet bei %d (Size: %d)\n\033[0m", ((middleHeader->headSize - 1) >> 3) - 1, middleHeader->headSize - 1);
+							#else 
+								printf("[ALLOC] Page-Rest eingeordnet bei %d (Size: %d)\n", ((middleHeader->headSize - 1) >> 3) - 1, middleHeader->headSize - 1);
+							#endif
 						#endif
 						
 						buckets[NUMBER_OF_BUCKETS - 1] = NULL;
 					} else {
 						buckets[NUMBER_OF_BUCKETS - 1] = ((void*)(middleHeader) + 2*sizeof(uint32_t));
 						#ifdef DEBUG_ALLOC 
-							printf("\033[96m[ALLOC] Page-Rest nicht neu eingeordnet!\n\033[0m");
+							#ifdef COLOURED
+								printf("\033[96m[ALLOC] Page-Rest nicht neu eingeordnet!\n\033[0m");
+							#else 
+								printf("[ALLOC] Page-Rest nicht neu eingeordnet!\n");
+							#endif
 						#endif
 					}
 				} else {
 					//Abspalten lohnt sich nicht --> direkt alles vergeben
 					#ifdef DEBUG_ALLOC 
-						printf("\033[96m\t\t--> lohnt sich nicht, vergebe alles!\n\033[0m");
+						#ifdef COLOURED
+							printf("\033[96m\t\t--> lohnt sich nicht, vergebe alles!\n\033[0m");
+						#else 
+							printf("\t\t--> lohnt sich nicht, vergebe alles!\n");
+						#endif
 					#endif
 					
 					ret = buckets[NUMBER_OF_BUCKETS - 1];
@@ -224,6 +325,10 @@ void my_free(void* ptr) {
 		printf("\033[32m[FREE] Freeing %p\n\033[0m", ptr); 
 	#endif
 	
+	#ifdef DEBUG_BUCKETS
+		printBuckets();
+	#endif
+	
 	combinedHeaders headers = extractHeaderData(ptr);
 
 	// uint8_t insertPos = (((headers.frontHeader->headSize)) >> 3) - 1;
@@ -233,20 +338,22 @@ void my_free(void* ptr) {
 	headers.frontHeader->headSize += 1;
 	headers.tailHeader->tailSize += 1;
 	
-	//Prev Zeiger einzufügenden Feld auf NULL setzen
+	//Prev Zeiger im einzufügenden Feld auf NULL setzen
 	*((void**)ptr) = NULL;
 	
-	// printf("Prev NULL %p\n", *((void**)ptr));
-	
 	//Falls nachfolgendes Element vorhanden (und länger als 1 Byte) prev Zeiger setzen
-	if(buckets[insertPos] && insertPos != 0) {
-		*((void**)buckets[insertPos]) = ptr;
+	if(buckets[insertPos]) {
+		if(insertPos != 0) {
+			*buckets[insertPos] = ptr;
+		}
+		headers.next = buckets[insertPos];
+	} else {
+		*headers.next = NULL;
 	}
 	
-	*headers.next = buckets[insertPos];
 	
 	// headers.next ? printf("Next set *: %p\n", *headers.next) : printf("Next set: %p\n", headers.next);
-	buckets[insertPos] = ptr;
+	buckets[insertPos] = (void**)ptr;
 	
 	#ifdef DEBUG_FREE 
 		printf("\033[32m[FREE] Element eingeordnet bei %d (Size: %d)\n\033[0m", insertPos, headers.frontHeader->headSize - 1);
@@ -361,14 +468,24 @@ void printBlocks() {
 		uint32_t *ptr = (uint32_t*)block[z];
 		uint32_t firstPointer = BLOCKSIZE + 5, secondPointer = BLOCKSIZE + 5;
 		bool used = false;
-		printf("\n    0: \033[32m%09d \033[0m", *ptr++);
+		
+		#ifdef COLOURED
+			printf("\n    0: \033[32m%09d \033[0m", *ptr++);
+		#else 
+			printf("\n    0: %09d ", *ptr++);
+		#endif
+		
 		for(uint32_t i = 1; i < length - 1; i++, ptr++) {
 			if(i % 20 == 0) {
 				printf("\n%5d: ", i);
 			}
 			
 			if(i == firstPointer || i == secondPointer) {
-				printf("\033[36m%19p \033[0m", *(void**)ptr);
+				#ifdef COLOURED
+					printf("\033[36m%19p \033[0m", *(void**)ptr);
+				#else 
+					printf("%19p ", *(void**)ptr);
+				#endif
 				i ++;
 				ptr++;
 				if(i % 20 == 0) {
@@ -376,7 +493,11 @@ void printBlocks() {
 				}
 			} else {
 				if(!(*ptr & 0xFFFF0000) && *ptr != 0) { 
-					printf("\033[32m%09d \033[0m", *ptr);
+					#ifdef COLOURED
+						printf("\033[32m%09d \033[0m", *ptr);
+					#else 
+						printf("%09d ", *ptr);
+					#endif
 					used = !(*ptr & 0x01);
 					if(((uintptr_t)ptr & 7) && !used) {
 						firstPointer = i + 1;
@@ -388,8 +509,34 @@ void printBlocks() {
 				}
 			}
 		}
-		printf("\033[32m%09d\033[0m \n\n", *ptr);
+		#ifdef COLOURED
+			printf("\033[32m%09d\033[0m \n\n", *ptr);
+		#else 
+			printf("%09d \n\n", *ptr);
+		#endif
 	}
 	printf("\n############## BLOCK MAP ######################\n");
+}
+#endif
+
+#ifdef DEBUG_BUCKETS
+void printBuckets() {
+	printf("\nBuckets:");
+	for(uint8_t i = 0; i < NUMBER_OF_BUCKETS; i++) {
+		printf("\n[%2d]: ", i);
+		
+		void **ptr = buckets[i];
+		
+		while(ptr) {
+			printf("%p --> ", ptr);
+			if(*ptr) {
+				ptr = *ptr;
+			} else {
+				printf("NULL");
+				break;
+			}
+		}
+	}
+	printf("\n");
 }
 #endif
