@@ -9,15 +9,13 @@
 #define MIN_OBJECT_SIZE 8
 #define MAX_OBJECT_SIZE 256
 
-#define DEBUG
-#define DEBUG_INIT
+//#define DEBUG
+//#define DEBUG_INIT
 
-/*Object alignment is represented in info header of a block with length INFO_SIZE.*/
-/*Every single entry in contents of our header stands for a "new Object" of MIN_OBJECT_SIZE in data section of the Block*/
+/////////////////////////////////////////////////////////////////////////////////////////
+//TODO: fix contents. sth messed up, as content listing just start at 8th entry?!?!?
 
-/*TODO: 
- * changeing all void* typedefs to struct qith pointer to next object. void pointer cannot be dereferenced*/
-
+/////////////////////////////////////////////////////////////////////////////////////////
 typedef struct Block {
     struct Block* next;
 }Block;
@@ -42,6 +40,7 @@ int updateContents(void* ptr);
 Block* getBlock(void*ptr);
 int getObjSize(void* ptr);
 int initBlock(Block* block);
+void printContents(Block* block);
 
 FreeObj* rootFree;
 Block* rootBlock;
@@ -59,6 +58,7 @@ void init_my_alloc() {
     rootFree = (FreeObj*) ((void*)rootBlock + HEADER_SIZE);
     rootFree->next = NULL;
     updateContents(rootFree);
+    //printContents(rootBlock);
 #ifdef DEBUG_INIT
     printf("Initialization finished!\n");
 #endif
@@ -135,6 +135,10 @@ void* my_alloc(size_t size) {
     object->next = (FreeObj*) ((void*)object + size);
     object->next->next = rootFree;
     rootFree = object->next;
+    updateContents(rootFree);
+    updateContents(object);
+    /////printf("look at first entry:");
+    /////printContents(newBlock);
     
     return object;
 
@@ -147,6 +151,7 @@ void my_free(void* ptr) {
 int updateContents(void* ptr){
 #ifdef DEBUG
     printf("updating contents with pointer: %p\n",ptr);
+    
 #endif
     Block* block = getBlock(ptr);
     if(block==NULL){
@@ -158,8 +163,9 @@ int updateContents(void* ptr){
     //position is the bit position
     unsigned int position = (int) (ptr -(void*) block - HEADER_SIZE)/8;
     /*not sure if indices are correct*/
+    void* contents = (void*) block + 8;
 
-    ((char*) block)[position/8] |= (1)<<(7-(position % 8));
+    ((char*) contents)[position/8] |= (1)<<(7-(position % 8));
     return 0;
 }
 
@@ -175,6 +181,9 @@ Block* getBlock(void*ptr){
       if(block->next==NULL) return NULL;
       block = block->next;
     }
+#ifdef DEBUG
+    printf("found block: %p\n",block);
+#endif
     return block;
 }
 
@@ -186,16 +195,21 @@ int getObjSize(void* ptr){
     printf("Getting object size...\n");
 #endif
     Block* block = getBlock(ptr);
+#ifdef DEBUG
+    printf("Contents of block:\n");
+    printContents(block);
+#endif
     unsigned int position = (ptr - (void*)block - HEADER_SIZE)/8;
     int pos0 = position;
     //going bitwise through conntents, looking for next object marker
+    void* contents = (void*) block + 8;
     do{
         position++;
-    }while(!(((char*) block)[position/8] & (1)<<(position % 8)));
+    }while(!(((char*) contents)[position/8] & (1)<<(position % 8)) && position<128);
 #ifdef DEBUG
     printf("found object size: %d\n",(position-pos0));
 #endif
-    return (position-pos0); //returns size in amount of Objects of MIN_OBJECT_SIZE 
+    return (position-pos0)*8; 
 
 }
 
@@ -204,8 +218,18 @@ int initBlock(Block* block){
     //filling header with zeros
     for(;cp<((char*) (block + HEADER_SIZE)); cp++) *cp=0;
 #ifdef DEBUG
-    printf("new block allocated and filled with zeros.\n");
+    printf("new block allocated %p and filled with zeros.\n",block);
 #endif
     return 0;
 }
+
+void printContents(Block* block){
+    int position = 8;
+    for(; position<HEADER_SIZE; position++){
+        (((char*) block)[position/8] & (1)<<(position % 8)) ? printf("%d",1) : printf("%d",0);
+
+    }
+    printf("\n");
+}
+
 
