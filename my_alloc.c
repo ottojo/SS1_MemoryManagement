@@ -47,6 +47,7 @@ Block* rootBlock;
 
 void init_my_alloc() {
 #ifdef DEBUG_INIT
+    printf("##########################################################################################################\n");
     printf("Initializing...\n");
 #endif
     rootBlock = get_block_from_system();
@@ -58,7 +59,6 @@ void init_my_alloc() {
     rootFree = (FreeObj*) ((void*)rootBlock + HEADER_SIZE);
     rootFree->next = NULL;
     updateContents(rootFree);
-    //printContents(rootBlock);
 #ifdef DEBUG_INIT
     printf("Initialization finished!\n");
 #endif
@@ -66,7 +66,7 @@ void init_my_alloc() {
 
 void* my_alloc(size_t size) {
 #ifdef DEBUG
-    printf("allocating mem of size: %ld\n",size);
+    printf("\n\nallocating mem of size: %ld\n",size);
 #endif
     FreeObj* object; 
     object = rootFree;
@@ -137,9 +137,11 @@ void* my_alloc(size_t size) {
     rootFree = object->next;
     updateContents(rootFree);
     updateContents(object);
-    /////printf("look at first entry:");
-    /////printContents(newBlock);
-    
+#ifdef DEBUG
+    printf("look at first entry:");
+    printContents(newBlock);
+    printf("allocation finished!\n");
+#endif
     return object;
 
 }
@@ -150,7 +152,7 @@ void my_free(void* ptr) {
 
 int updateContents(void* ptr){
 #ifdef DEBUG
-    printf("updating contents with pointer: %p\n",ptr);
+    printf("\nupdating contents with pointer: %p\n",ptr);
     
 #endif
     Block* block = getBlock(ptr);
@@ -162,10 +164,13 @@ int updateContents(void* ptr){
     }
     //position is the bit position
     unsigned int position = (int) (ptr -(void*) block - HEADER_SIZE)/8;
-    /*not sure if indices are correct*/
+    /*pretty sure that indices are correct*/
     void* contents = (void*) block + 8;
 
     ((char*) contents)[position/8] |= (1)<<(7-(position % 8));
+#ifdef DEBUG
+    printf("Updating finished!");
+#endif
     return 0;
 }
 
@@ -176,9 +181,11 @@ Block* getBlock(void*ptr){
 #ifdef DEBUG
     printf("trying to find corresponding block to ptr: %p\n",ptr);
 #endif
-    Block* block = rootBlock;
+    Block* block = (Block*) rootBlock;
     while((void*)ptr<(void*)block || (void*)ptr>(void*)(block+BLOCK_SIZE)){
-      if(block->next==NULL) return NULL;
+      if(block->next==NULL){
+          return NULL;
+      }
       block = block->next;
     }
 #ifdef DEBUG
@@ -201,13 +208,13 @@ int getObjSize(void* ptr){
 #endif
     unsigned int position = (ptr - (void*)block - HEADER_SIZE)/8;
     int pos0 = position;
-    //going bitwise through conntents, looking for next object marker
+    //going bitwise through contents, looking for next object marker
     void* contents = (void*) block + 8;
     do{
         position++;
-    }while(!(((char*) contents)[position/8] & (1)<<(position % 8)) && position<128);
+    }while(!(((char*) contents)[position/8] & (1)<<(7-(position % 8))) && position<128);
 #ifdef DEBUG
-    printf("found object size: %d\n",(position-pos0));
+    printf("found object size: %d\n",(position-pos0)*8);
 #endif
     return (position-pos0)*8; 
 
@@ -218,15 +225,16 @@ int initBlock(Block* block){
     //filling header with zeros
     for(;cp<((char*) (block + HEADER_SIZE)); cp++) *cp=0;
 #ifdef DEBUG
+    printf("NEW BLOCK//////////////////////////////////////////////////////////////////////////////////////////////\n");
     printf("new block allocated %p and filled with zeros.\n",block);
 #endif
     return 0;
 }
 
 void printContents(Block* block){
-    int position = 8;
+    int position = 8*8;
     for(; position<HEADER_SIZE; position++){
-        (((char*) block)[position/8] & (1)<<(position % 8)) ? printf("%d",1) : printf("%d",0);
+        (((char*) block)[position/8] & (1)<<(7-(position % 8))) ? printf("%d",1) : printf("%d",0);
 
     }
     printf("\n");
