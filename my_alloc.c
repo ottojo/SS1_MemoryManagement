@@ -127,15 +127,6 @@ void removeFreeSpaceFromList(doublePointer *p) {
 #endif
             return;
         }
-
-        void **prev = (void **) buckets[0];
-
-        while (*prev != (void **) p) {
-            prev = *prev;
-        }
-
-        *prev = *(void **) p;
-        return;
     }
 
     doublePointer *prevObject = p->firstPointer;
@@ -242,9 +233,9 @@ void *my_alloc(size_t size) {
     if (buckets[i] == 0) {
 
         // Search possible locations, choose the largest (to prevent fragmentation / very small free spaces)
-        int possibleLocations[100];
+        int possibleLocations[5];
         int n = 0;
-        while (i < NUMBER_OF_BUCKETS - 1) {
+        while (i < NUMBER_OF_BUCKETS - 1 && n < 5) {
             if (buckets[i] != 0) {
                 possibleLocations[n] = i;
                 ++n;
@@ -364,33 +355,37 @@ void my_free(void *ptr) {
 #endif
 
         int tailingObjectSize = realSize(footerOf(ptr)->tailingObjectSize);
-        totalFreeSize = objectSize + sizeof(header) + tailingObjectSize;
+        if (tailingObjectSize != 8) {
+            totalFreeSize = objectSize + sizeof(header) + tailingObjectSize;
 
-        void *tailingObject = ptr + objectSize + sizeof(header);
+            void *tailingObject = ptr + objectSize + sizeof(header);
 
 #ifdef DEBUG_FREE
-        printf("[FREE] Concatenating free space behind (object %p).\n", tailingObject);
+            printf("[FREE] Concatenating free space behind (object %p).\n", tailingObject);
 #endif
 
 #ifdef DEBUG_FREE
-        printf("[FREE] Removing object from list.\n");
+            printf("[FREE] Removing object from list.\n");
 #endif
-        removeFreeSpaceFromList(tailingObject);
+            removeFreeSpaceFromList(tailingObject);
+        }
     }
 
     // Combine preceding free space
     if (headerOf(ptr)->precedingObjectSize & 1) {
         int precedingObjectSize = realSize(headerOf(ptr)->precedingObjectSize);
-        totalFreeSize += precedingObjectSize + sizeof(header);
+        if (precedingObjectSize != 8) {
+            totalFreeSize += precedingObjectSize + sizeof(header);
 
 #ifdef DEBUG_FREE
-        printf("[FREE] There is free space (object size %d) before object.\n",
-               precedingObjectSize);
+            printf("[FREE] There is free space (object size %d) before object.\n",
+                   precedingObjectSize);
 #endif
 
-        void *precedingObject = ptr - precedingObjectSize - sizeof(header);
-        removeFreeSpaceFromList(precedingObject);
-        ptr = precedingObject;
+            void *precedingObject = ptr - precedingObjectSize - sizeof(header);
+            removeFreeSpaceFromList(precedingObject);
+            ptr = precedingObject;
+        }
     }
 
     // expand free object
