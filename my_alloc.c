@@ -3,19 +3,15 @@
 #include "my_system.h"
 #include "stdio.h"
 
-#define HEADER_SIZE (8+128)
+#define HEADER_SIZE (8+126+2)
 #define BLOCK_SIZE 8192
-#define PAYLOAD_SIZE (BLOCK_SIZE-HEADER_SIZE)
+#define DATA_SIZE (BLOCK_SIZE-HEADER_SIZE)
 #define MIN_OBJECT_SIZE 8
 #define MAX_OBJECT_SIZE 256
 
 //#define DEBUG
 //#define DEBUG_INIT
-
-/////////////////////////////////////////////////////////////////////////////////////////
-//TODO: fix contents. sth messed up, as content listing just start at 8th entry?!?!?
-
-/////////////////////////////////////////////////////////////////////////////////////////
+//#define DEBUG_CONTENT
 typedef struct Block {
     struct Block* next;
 }Block;
@@ -61,6 +57,7 @@ void init_my_alloc() {
     updateContents(rootFree);
 #ifdef DEBUG_INIT
     printf("Initialization finished!\n");
+    printf("rootFree: %p", rootFree);
 #endif
 }
 
@@ -76,7 +73,7 @@ void* my_alloc(size_t size) {
 #ifdef DEBUG
         printf("rootFree matches with query!\n");
 #endif
-        if(rootFree->next!=NULL && rootFree+size==rootFree->next){
+        if(rootFree->next!=NULL && (FreeObj*) ((void*)rootFree+size)==rootFree->next){
             rootFree = rootFree->next;
             return object;
         }
@@ -99,13 +96,13 @@ void* my_alloc(size_t size) {
 #ifdef DEBUG
             printf("found one matching\n");
 #endif
-           if(nextfree->next!=NULL && nextfree+size == nextfree->next){
+           if(nextfree->next!=NULL && (FreeObj*)((void*)nextfree+size) == nextfree->next){
                object->next = nextfree->next;
                return nextfree;
            }
 
            /*object here is the new freepointer between nextfree, wich will be returned, and *nextfree*/
-           object->next = (FreeObj*) (void*)nextfree+size;
+           object->next = (FreeObj*) ((void*)nextfree+size);
            object->next->next = nextfree->next;
            updateContents(nextfree->next);
            return nextfree;
@@ -165,7 +162,7 @@ int updateContents(void* ptr){
     //position is the bit position
     unsigned int position = (int) (ptr -(void*) block - HEADER_SIZE)/8;
     /*pretty sure that indices are correct*/
-    void* contents = (void*) block + 8;
+    void* contents = (void*)block + 8;
 
     ((char*) contents)[position/8] |= (1)<<(7-(position % 8));
 #ifdef DEBUG
@@ -209,10 +206,10 @@ int getObjSize(void* ptr){
     unsigned int position = (ptr - (void*)block - HEADER_SIZE)/8;
     int pos0 = position;
     //going bitwise through contents, looking for next object marker
-    void* contents = (void*) block + 8;
+    void* contents = (void*) (block + 8);
     do{
         position++;
-    }while(!(((char*) contents)[position/8] & (1)<<(7-(position % 8))) && position<128);
+    }while(!(((char*) contents)[position/8] & (1)<<(7-(position % 8))) && position<DATA_SIZE/8);
 #ifdef DEBUG
     printf("found object size: %d\n",(position-pos0)*8);
 #endif
@@ -223,7 +220,7 @@ int getObjSize(void* ptr){
 int initBlock(Block* block){
     char* cp = (char*) block;
     //filling header with zeros
-    for(;cp<((char*) (block + HEADER_SIZE)); cp++) *cp=0;
+    for(;cp<(char*) (DATA_SIZE/8); cp++) *cp=0;
 #ifdef DEBUG
     printf("NEW BLOCK//////////////////////////////////////////////////////////////////////////////////////////////\n");
     printf("new block allocated %p and filled with zeros.\n",block);
@@ -232,9 +229,15 @@ int initBlock(Block* block){
 }
 
 void printContents(Block* block){
-    int position = 8*8;
-    for(; position<HEADER_SIZE; position++){
-        (((char*) block)[position/8] & (1)<<(7-(position % 8))) ? printf("%d",1) : printf("%d",0);
+    void* content = (void*)block + 8;
+    int position = 0;
+    for(; position<1007; position++){
+#ifdef DEBUG_CONTENT
+        if(position % 8==0){
+            printf("\n %d pointer: %p ", position, &(((char*) content)[position/8]));
+        }
+#endif
+        (((char*) content)[position/8] & (1)<<(7-(position % 8))) ? printf("%d",1) : printf("%d",0);
 
     }
     printf("\n");
