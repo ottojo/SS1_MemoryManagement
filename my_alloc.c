@@ -21,9 +21,8 @@ typedef struct Block {
 /*TODO: 
  * High potential for optimizing here
  * Ideas:
- * -Thinking of filling each block first, then using freed Object space or the other way round
+ * -seperated FreeList for each size
  * -Sorting
- * -weighted Predictions
  */
 typedef struct FreeObj{
     struct FreeObj* next;
@@ -69,12 +68,18 @@ void* my_alloc(size_t size) {
     object = rootFree;
 
     /*case: rootFree matches with query*/
-    if(getObjSize(rootFree)>=size){
+    int rootFreeSize = getObjSize(rootFree);
+    if(rootFreeSize>=size){
 #ifdef DEBUG
         printf("rootFree matches with query!\n");
 #endif
-        if(rootFree->next!=NULL && (FreeObj*) ((void*)rootFree+size)==rootFree->next){
-            rootFree = rootFree->next;
+        if(rootFreeSize==size){
+            if(rootFree->next!=NULL){
+                rootFree = rootFree->next;
+            }else{
+                rootFree = (FreeObj*) ((void*) rootFree + size);
+                updateContents(rootFree);
+            }
             return object;
         }
         rootFree = (FreeObj*) ((void*)rootFree + size);
@@ -92,19 +97,25 @@ void* my_alloc(size_t size) {
         printf("try next\n");
 #endif
         //nextfree is matching
-        if(getObjSize(nextfree)>=size){
+        int nextfreeSize = getObjSize(nextfree);
+        if(nextfreeSize>=size){
 #ifdef DEBUG
             printf("found one matching\n");
 #endif
-           if(nextfree->next!=NULL && (FreeObj*)((void*)nextfree+size) == nextfree->next){
-               object->next = nextfree->next;
+           if(nextfreeSize==size){
+               if(nextfree->next!=NULL){
+                   object->next = nextfree->next;
+               }else{
+                   object->next = (FreeObj*) ((void*) nextfree + size);
+                   updateContents(object->next);
+               }
                return nextfree;
            }
 
            /*object here is the new freepointer between nextfree, wich will be returned, and *nextfree*/
            object->next = (FreeObj*) ((void*)nextfree+size);
            object->next->next = nextfree->next;
-           updateContents(nextfree->next);
+           updateContents(object->next);
            return nextfree;
         }
         /*else jump to nextfree*/
@@ -144,7 +155,9 @@ void* my_alloc(size_t size) {
 }
 
 void my_free(void* ptr) {
-
+    FreeObj* newFree = (FreeObj*) ptr;
+    newFree->next = rootFree;
+    rootFree = newFree;
 }
 
 int updateContents(void* ptr){
@@ -193,7 +206,7 @@ Block* getBlock(void*ptr){
 
 
 /*returns size to next pointer according to contents in header
-* size is amount of Objects of MIN_OBJECT_SIZE*/ 
+* size is in Bytes*/ 
 int getObjSize(void* ptr){
 #ifdef DEBUG
     printf("Getting object size...\n");
@@ -206,7 +219,7 @@ int getObjSize(void* ptr){
     unsigned int position = (ptr - (void*)block - HEADER_SIZE)/8;
     int pos0 = position;
     //going bitwise through contents, looking for next object marker
-    void* contents = (void*) (block + 8);
+    void* contents = (void*)block + 8;
     do{
         position++;
     }while(!(((char*) contents)[position/8] & (1)<<(7-(position % 8))) && position<DATA_SIZE/8);
