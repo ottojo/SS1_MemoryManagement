@@ -43,7 +43,7 @@ doublePointer *buckets[NUMBER_OF_BUCKETS];
 
 #ifdef DEBUG_USED
 long int sumUsed = 0;
-long int sumAvailiable = 0;
+long int sumAvailable = 0;
 #endif
 
 // Each 8 byte header stores the size of the object before and after it.
@@ -139,7 +139,7 @@ void removeFreeSpaceFromList(doublePointer *p) {
 #ifdef DEBUG_USED
 
 void printUsed() {
-    printf("Used: %f%%\n", 100 * (double) sumUsed / sumAvailiable);
+    printf("Used: %f%%\n", 100 * (double) sumUsed / sumAvailable);
 }
 
 #endif
@@ -152,7 +152,7 @@ page *initNewPage() {
     void *ret = get_block_from_system();
 
 #ifdef DEBUG_USED
-    sumAvailiable += BLOCKSIZE;
+    sumAvailable += BLOCKSIZE;
 #endif
 
     if (!pointerPrefix) {
@@ -348,8 +348,7 @@ void my_free(void *ptr) {
         // Tailing object is also empty
 
 #ifdef DEBUG_FREE
-        printf("[FREE] There is free space (object size %d) behind object.\n",
-               realSize(footerOf(ptr)->tailingObjectSize));
+        printf("[FREE] There is free space (object size %d) behind object.\n", footer->tailingObjectSize);
 #endif
 
         int tailingObjectSize = realSize(footer->tailingObjectSize);
