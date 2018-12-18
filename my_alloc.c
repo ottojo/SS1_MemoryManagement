@@ -9,9 +9,9 @@
 #define MIN_OBJECT_SIZE 8
 #define MAX_OBJECT_SIZE 256
 
-//#define DEBUG
-//#define DEBUG_INIT
-//#define DEBUG_CONTENT
+#define DEBUG
+#define DEBUG_INIT
+#define DEBUG_CONTENT
 typedef struct Block {
     struct Block* next;
 }Block;
@@ -37,7 +37,7 @@ int getObjSize(void* ptr);
 int initBlock(Block* block);
 void printContents(Block* block);
 
-FreeObj* rootFree;
+FreeObj* rootFree[32];
 Block* rootBlock;
 
 void init_my_alloc() {
@@ -51,12 +51,13 @@ void init_my_alloc() {
         exit(0);
     }
     initBlock(rootBlock);
-    rootFree = (FreeObj*) ((void*)rootBlock + HEADER_SIZE);
-    rootFree->next = NULL;
-    updateContents(rootFree);
+    //assuming, that new Block has more space that MAX_OBJECT_SIZE
+    rootFree[(MAX_OBJECT_SIZE/8-1)] = (FreeObj*) ((void*)rootBlock + HEADER_SIZE);
+    rootFree[(MAX_OBJECT_SIZE/8-1)]->next = NULL;
+    updateContents(rootFree[(MAX_OBJECT_SIZE/8)-1]);
 #ifdef DEBUG_INIT
     printf("Initialization finished!\n");
-    printf("rootFree: %p", rootFree);
+    printf("rootFree: %p", rootFree[(MAX_OBJECT_SIZE/8)-1]);
 #endif
 }
 
@@ -64,100 +65,94 @@ void* my_alloc(size_t size) {
 #ifdef DEBUG
     printf("\n\nallocating mem of size: %ld\n",size);
 #endif
-    FreeObj* object; 
-    object = rootFree;
+    FreeObj* object;
+    
+    int freeIterator = (size/8)-1;
 
-    /*case: rootFree matches with query*/
-    int rootFreeSize = getObjSize(rootFree);
-    if(rootFreeSize>=size){
+    //moving freeIterator to next free Object with size of at least requested size
+    int MAX_freeIterator = (MAX_OBJECT_SIZE/8)-1;
+    while(rootFree[freeIterator]==NULL && freeIterator<MAX_freeIterator) freeIterator++;
+
+    /*case: no matching Object
+     * -->allocating new Block*/
+    if(rootFree[freeIterator]==NULL){
 #ifdef DEBUG
-        printf("rootFree matches with query!\n");
+        printf("no nextFree matching. Allocating new Block!\n");
 #endif
-        if(rootFreeSize==size){
-            if(rootFree->next!=NULL){
-                rootFree = rootFree->next;
-            }else{
-                rootFree = (FreeObj*) ((void*) rootFree + size);
-                updateContents(rootFree);
-            }
-            return object;
+        Block* newBlock = get_block_from_system();
+        if(newBlock==NULL){
+            fprintf(stderr,"System MEM failure!\n");
+            exit(0);
         }
-        rootFree = (FreeObj*) ((void*)rootFree + size);
-        rootFree->next = object->next; //because *object now holds the next element
-        updateContents(rootFree);
+        initBlock(newBlock);
+
+        //inserting newBlock as rootBlock of List
+        newBlock->next = rootBlock;
+        rootBlock = newBlock;
+        
+        //assume that new block will definetly be large enough for Object
+        object = (FreeObj*) ((void*)rootBlock + HEADER_SIZE);
+        FreeObj* newFree =  (FreeObj*) ((void*) object + size);
+        rootFree[(MAX_OBJECT_SIZE/8)-1] = newFree;
+        updateContents(object);
+        updateContents(newFree);
+
+#ifdef DEBUG
+        printf("look at first entry:");
+        printContents(newBlock);
+        printf("allocation finished!\n");
+#endif
+        return object;
+        
+    }
+    
+    /*case: matching freeObject has unknown size larger than requested size     
+     * ->freeObject is divided into two parts. 
+     *  --first part will be returned
+     *  --second part goes back to the list. Place depends on the remaining size.*/
+    if(freeIterator>(size/8)-1){
+#ifdef DEBUG
+        printf("found free Object with unknown size larger than requested size!\n");
+#endif
+        int freeObjSize = getObjSize(rootFree[freeIterator]);
+        object = rootFree[freeIterator];
+        //creating newFree Object from unused mem of matching FreeObject
+        FreeObj* newFree = (FreeObj*) ((void*) rootFree[freeIterator] + size); 
+        rootFree[freeIterator] = rootFree[freeIterator]->next; //can be NULL
+        int newFreeSize = (freeObjSize-size >= MAX_OBJECT_SIZE) ? (MAX_OBJECT_SIZE) : (freeObjSize-size);
+        newFree->next = rootFree[(newFreeSize/8)-1]; //can be NULL
+        rootFree[(newFreeSize/8)-1] = newFree;
+        updateContents(newFree);
         return object;
     }
-    /*case: any other element does match*/
-#ifdef DEBUG
-    printf("root does not match with query!\n");
-#endif
-    while(object->next!=NULL){
-        FreeObj* nextfree = object->next;
-#ifdef DEBUG
-        printf("try next\n");
-#endif
-        //nextfree is matching
-        int nextfreeSize = getObjSize(nextfree);
-        if(nextfreeSize>=size){
-#ifdef DEBUG
-            printf("found one matching\n");
-#endif
-           if(nextfreeSize==size){
-               if(nextfree->next!=NULL){
-                   object->next = nextfree->next;
-               }else{
-                   object->next = (FreeObj*) ((void*) nextfree + size);
-                   updateContents(object->next);
-               }
-               return nextfree;
-           }
-
-           /*object here is the new freepointer between nextfree, wich will be returned, and *nextfree*/
-           object->next = (FreeObj*) ((void*)nextfree+size);
-           object->next->next = nextfree->next;
-           updateContents(object->next);
-           return nextfree;
-        }
-        /*else jump to nextfree*/
-        object = nextfree;
-    }
-
-    /*no matching free Object found -> allocate new block*/
-#ifdef DEBUG
-    printf("no nextFree matching. Allocating new Block!\n");
-#endif
-    Block* newBlock = get_block_from_system();
-    if(newBlock==NULL){
-        fprintf(stderr,"System MEM failure!\n");
-        exit(0);
-    }
-    initBlock(newBlock);
-
-    //inserting newBlock as rootBlock of List
-    newBlock->next = rootBlock;
-    rootBlock = newBlock;
     
-    //assume that new block will definetly be large enough for Object
-    
-    object = (FreeObj*) ((void*)newBlock + HEADER_SIZE);
-    object->next = (FreeObj*) ((void*)object + size);
-    object->next->next = rootFree;
-    rootFree = object->next;
-    updateContents(rootFree);
-    updateContents(object);
+    /*case: matching object found:*/
+    //case matching object has same size as requested size
 #ifdef DEBUG
-    printf("look at first entry:");
-    printContents(newBlock);
-    printf("allocation finished!\n");
+    printf("found free Object with size perfectly matching with requested size!\n");
 #endif
-    return object;
+    if(freeIterator==(size/8)-1){
+        object = rootFree[freeIterator];
+        rootFree[freeIterator] = rootFree[freeIterator]->next;
+        return object;
+    }
+    fprintf(stdout,"FATAL ERROR: RETURNING NULL POINTER TO USER!!!\n");
+    exit(0);
+    return NULL;
 
 }
 
 void my_free(void* ptr) {
+
+#ifdef DEBUG
+    printf("\nfree pointer: %p\n",ptr);
+#endif
     FreeObj* newFree = (FreeObj*) ptr;
-    newFree->next = rootFree;
-    rootFree = newFree;
+    int newFreeSize = getObjSize(ptr);
+    newFree->next = rootFree[(newFreeSize/8)-1];
+    rootFree[(newFreeSize/8)-1] = newFree;
+    printf("freeIterator: %d\n",(newFreeSize/8)-1);
+
 }
 
 int updateContents(void* ptr){
@@ -179,7 +174,7 @@ int updateContents(void* ptr){
 
     ((char*) contents)[position/8] |= (1)<<(7-(position % 8));
 #ifdef DEBUG
-    printf("Updating finished!");
+    printf("Updating finished!\n");
 #endif
     return 0;
 }
@@ -192,7 +187,7 @@ Block* getBlock(void*ptr){
     printf("trying to find corresponding block to ptr: %p\n",ptr);
 #endif
     Block* block = (Block*) rootBlock;
-    while((void*)ptr<(void*)block || (void*)ptr>(void*)(block+BLOCK_SIZE)){
+    while((void*)ptr<(void*)block || (void*)ptr>(void*)((void*)block+BLOCK_SIZE)){
       if(block->next==NULL){
           return NULL;
       }
@@ -247,7 +242,7 @@ void printContents(Block* block){
     for(; position<1007; position++){
 #ifdef DEBUG_CONTENT
         if(position % 8==0){
-            printf("\n %d pointer: %p ", position, &(((char*) content)[position/8]));
+            printf("\n %d contentptr: %p to: %p  ", position, &(((char*) content)[position/8]),(void*) ((void*) block + HEADER_SIZE + 8*position));
         }
 #endif
         (((char*) content)[position/8] & (1)<<(7-(position % 8))) ? printf("%d",1) : printf("%d",0);
