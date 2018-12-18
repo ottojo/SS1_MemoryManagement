@@ -67,10 +67,6 @@ uint32_t realSize(uint32_t s) {
     return ~(~s | (uint32_t) 1);
 }
 
-header *footerOf(void *object) {
-    return object + realSize(headerOf(object)->tailingObjectSize);
-}
-
 // Utility methods for doublepointer
 void *firstPointer(doublePointer d) {
     if (((uintptr_t) d >> 32) & 1) {
@@ -141,9 +137,11 @@ void removeFreeSpaceFromList(doublePointer *p) {
 }
 
 #ifdef DEBUG_USED
+
 void printUsed() {
     printf("Used: %f%%\n", 100 * (double) sumUsed / sumAvailiable);
 }
+
 #endif
 
 /**
@@ -182,7 +180,8 @@ page *initNewPage() {
     head->precedingObjectSize = START_OF_PAGE;
 
     //"Footer" (header verwendet als Footer) an den Ende der Page setzen
-    header *foot = footerOf(ret + sizeof(header));
+    // header *foot = footerOf(ret + sizeof(header));
+    header *foot = ret + BLOCKSIZE - sizeof(header);
     foot->precedingObjectSize = head->tailingObjectSize;
     foot->tailingObjectSize = END_OF_PAGE;
 
@@ -268,7 +267,7 @@ void *my_alloc(size_t size) {
 
     // Set header + footer of new object
     objectHeader->tailingObjectSize = (uint32_t) size;
-    objectFooter = footerOf(object);
+    objectFooter = object + size;
     objectFooter->precedingObjectSize = (uint32_t) size;
 
     if (availableObjectSize > size) {
@@ -283,7 +282,7 @@ void *my_alloc(size_t size) {
 #endif
         header *freeObjectHeader = objectFooter;
         freeObjectHeader->tailingObjectSize = remainingObjectSpace | 1;
-        header *freeObjectFooter = footerOf(remainingFreeObjectPtr);
+        header *freeObjectFooter = remainingFreeObjectPtr + remainingObjectSpace;
         freeObjectFooter->precedingObjectSize = remainingObjectSpace | 1;
 
 #ifdef DEBUG_ALLOC
@@ -344,7 +343,8 @@ void my_free(void *ptr) {
 #endif
 
     // Combine tailing free space
-    if (footerOf(ptr)->tailingObjectSize & 1) {
+    header *footer = ptr + objectSize;
+    if (footer->tailingObjectSize & 1) {
         // Tailing object is also empty
 
 #ifdef DEBUG_FREE
@@ -352,7 +352,7 @@ void my_free(void *ptr) {
                realSize(footerOf(ptr)->tailingObjectSize));
 #endif
 
-        int tailingObjectSize = realSize(footerOf(ptr)->tailingObjectSize);
+        int tailingObjectSize = realSize(footer->tailingObjectSize);
         totalFreeSize = objectSize + sizeof(header) + tailingObjectSize;
 
         void *tailingObject = ptr + objectSize + sizeof(header);
@@ -384,7 +384,8 @@ void my_free(void *ptr) {
 
     // expand free object
     headerOf(ptr)->tailingObjectSize = (uint32_t) totalFreeSize | 1;
-    footerOf(ptr)->precedingObjectSize = (uint32_t) totalFreeSize | 1;
+    footer = ptr + totalFreeSize;
+    footer->precedingObjectSize = (uint32_t) totalFreeSize | 1;
 
     // Insert
     int index = (totalFreeSize / 8) - 1;
