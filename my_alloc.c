@@ -126,6 +126,11 @@ void removeFreeSpaceFromList(doublePointer *p) {
             printf("[REMOVE_LIST] buckets[0] is now %p.\n", buckets[0]);
 #endif
             return;
+        } else {
+#ifdef DEBUG_REMOVE_LIST
+            printf("[REMOVE_LIST] Ignoring because we would have to search through list.\n");
+#endif
+            return;
         }
     }
 
@@ -355,10 +360,12 @@ void my_free(void *ptr) {
 #endif
 
         int tailingObjectSize = realSize(footerOf(ptr)->tailingObjectSize);
-        if (tailingObjectSize != 8) {
+
+        void *tailingObject = ptr + objectSize + sizeof(header);
+
+        if (tailingObjectSize != 8 || tailingObject == buckets[0]) {
             totalFreeSize = objectSize + sizeof(header) + tailingObjectSize;
 
-            void *tailingObject = ptr + objectSize + sizeof(header);
 
 #ifdef DEBUG_FREE
             printf("[FREE] Concatenating free space behind (object %p).\n", tailingObject);
@@ -374,7 +381,9 @@ void my_free(void *ptr) {
     // Combine preceding free space
     if (headerOf(ptr)->precedingObjectSize & 1) {
         int precedingObjectSize = realSize(headerOf(ptr)->precedingObjectSize);
-        if (precedingObjectSize != 8) {
+        void *precedingObject = ptr - precedingObjectSize - sizeof(header);
+
+        if (precedingObjectSize != 8 || precedingObject == buckets[0]) {
             totalFreeSize += precedingObjectSize + sizeof(header);
 
 #ifdef DEBUG_FREE
@@ -382,7 +391,6 @@ void my_free(void *ptr) {
                    precedingObjectSize);
 #endif
 
-            void *precedingObject = ptr - precedingObjectSize - sizeof(header);
             removeFreeSpaceFromList(precedingObject);
             ptr = precedingObject;
         }
