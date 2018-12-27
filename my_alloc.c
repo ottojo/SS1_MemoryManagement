@@ -59,6 +59,9 @@ void removeFreeSpaceFromList(void **ptr);
 				so ist das Feld frei. Die "wirkliche" Größe muss dann durch Subtraktion dieser 1 errechnet werden.
 				Insbesondere sind also gerade bzw. durch 8 teilbare Größenangaben belegte Felder.
 				
+	Die Implementierung deckt sich vom Ansatz her mit dem des Branches "doubly-linked list" von ottojo,
+	implementiert das ganze aber etwas anders. 
+				
 	TODO:
 	- Effizienzoptimierung, insbesondere in Bezug auf die Geschwindigkeit
 */
@@ -106,13 +109,13 @@ void* my_alloc(size_t size) {
 	void *ret = NULL;
 	uint8_t pos = (size >> 3) - 1;
 	
-	// #ifdef DEBUG_BUCKETS
-		// printBuckets();
-	// #endif
+	#ifdef DEBUG_BUCKETS
+		printBuckets();
+	#endif
 	
-	// #ifdef DEBUG_BLOCK
-		// printBlocks();
-	// #endif
+	#ifdef DEBUG_BLOCK
+		printBlocks();
+	#endif
 	
 	//Überprüfe, ob im entsprechenden Fach der geforderten Größe noch Speicher vorhanden ist
 	if(buckets[pos]) {
@@ -232,7 +235,6 @@ void* my_alloc(size_t size) {
 				
 				ret = (void*)buckets[divPos];
 				header *head = extractHeader(ret);
-				// header *footer = extractHeader((void*)head + (head->headSize & 0xFFFFFFFE) + 2*sizeof(header));
 				header *footer = (header*)(ret + (head->headSize & 0xFFFFFFFE));
 				
 				//Mittelheader einbauen
@@ -363,7 +365,6 @@ void* my_alloc(size_t size) {
 						//Prev-Zeiger des nachfolgenden Listenelements entsprechend verschieben
 						if(nextElem) {
 							header *nextElemHeader = extractHeader(nextElem);
-							// printf("Header: %d | %d\n", nextElemHeader->tailSize, nextElemHeader->headSize);
 							*((void**)((void*)nextElemHeader + (nextElemHeader->headSize & 0xFFFFFFFE))) = (void*)restElem;
 						}
 						
@@ -398,15 +399,9 @@ void* my_alloc(size_t size) {
 					void *nextElem = *(buckets[NUMBER_OF_BUCKETS - 1]);
 					buckets[NUMBER_OF_BUCKETS - 1] = nextElem;
 					if(nextElem) {
-						// puts("A");
 						header *nextElemHeader = extractHeader(nextElem);
-						// printf("NextElemHeader %d | %d\n", nextElemHeader->tailSize, nextElemHeader->headSize);
-						// puts("B");
 						*((void**)((void*)nextElemHeader + (nextElemHeader->headSize & 0xFFFFFFFE))) = NULL;
-						// puts("C");
 					}
-					
-					// puts("ENDE");
 				}
 			}
 		}
@@ -437,7 +432,6 @@ void my_free(void* ptr) {
 	
 	#ifdef DEBUG_FREE 
 		printf("\033[32m[FREE] Freeing %p [Size: %d]\n\033[0m", ptr, freeSize & 0xFFFFFFFE); 
-		//printf("Header: %d | %d\t\tFooter: %d | %d\n", head->tailSize, head->headSize, footer->tailSize, footer->headSize);
 	#endif
 	
 	header *newHeader = head;
@@ -488,35 +482,16 @@ void my_free(void* ptr) {
 			void*** prevPtr = (void***)((void*)head - sizeof(void*));
 			void*** nextPtr = (void***)((void*)newHeader + sizeof(header));
 			
-			// printf("prevPtr:   %p\n", prevPtr);
-			// if(prevPtr) {
-				// printf("*prevPtr:  %p\n", *prevPtr);
-				// if(*prevPtr) {
-					// printf("**prevPtr: %p\n", **prevPtr);
-				// }
-			// }
-			
-			// printf("nextPtr:   %p\n", nextPtr);
-			// if(nextPtr) {
-				// printf("*nextPtr:  %p\n", *nextPtr);
-				// if(*nextPtr) {
-					// printf("**nextPtr: %p\n", **nextPtr);
-				// }
-			// }
-			
 			//Next Pointer des in der Liste vorher eingeordneten Feldes umbiegen
 			if(prevPtr && *prevPtr) {
-				// puts("A1");
 				**prevPtr = (void*)*nextPtr;
 			} else {
-				// puts("B1");
 				//Element steht am Anfang der Liste
 				buckets[bucketPos] = *nextPtr;
 			}
 			
 			//Prev Pointer des in der Liste dahinter eingeordneten Feldes umbiegen	
 			if(nextPtr && *nextPtr) {
-				// puts("C1");
 				header *nextElemHeader = (header*)((void*)(*nextPtr) - sizeof(header));
 				*(void**)((void*)nextElemHeader + (nextElemHeader->headSize & 0xFFFFFFFE)) = (void*)(*prevPtr);
 			} //Else: Element steht am Ende der Liste --> nichts zu tun
@@ -568,36 +543,16 @@ void my_free(void* ptr) {
 			void*** prevPtr = (void***)((void*)newFooter - sizeof(void*));
 			void*** nextPtr = (void***)((void*)footer + sizeof(header));
 			
-			// printf("prevPtr:   %p\n", prevPtr);
-			// if(prevPtr) {
-				// printf("*prevPtr:  %p\n", *prevPtr);
-				// if(*prevPtr) {
-					// printf("**prevPtr: %p\n", **prevPtr);
-				// }
-			// }
-			
-			// printf("nextPtr:   %p\n", nextPtr);
-			// if(nextPtr) {
-				// printf("*nextPtr:  %p\n", *nextPtr);
-				// if(*nextPtr) {
-					// printf("**nextPtr: %p\n", **nextPtr);
-				// }
-			// }
-			
 			//Next Pointer des in der Liste vorher eingeordneten Feldes umbiegen
 			if(prevPtr && *prevPtr) {
-				// puts("A2");
 				**prevPtr = (void*)*nextPtr;
 			} else {
-				// puts("B2");
 				//Element steht am Anfang der Liste
 				buckets[bucketPos] = *nextPtr;
-				// printf("buckets[%d]: %p\n", bucketPos, buckets[bucketPos]);
 			}
 			
 			//Prev Pointer des in der Liste dahinter eingeordneten Feldes umbiegen
 			if(nextPtr && *nextPtr) {
-				// puts("C2");
 				header *nextElemHeader = (header*)((void*)(*nextPtr) - sizeof(header));
 				*((void**)((void*)nextElemHeader + (nextElemHeader->headSize & 0xFFFFFFFE))) = (void*)(*prevPtr);
 			} //Else: Element steht am Ende der Liste --> nichts zu tun
@@ -635,9 +590,9 @@ void my_free(void* ptr) {
 	
 	#ifdef DEBUG_SPECIFIED
 		if(actionCounter > DEBUG_SPECIFIED) {
-			// #ifdef DEBUG_BLOCK
-				// printBlocks();
-			// #endif
+			#ifdef DEBUG_BLOCK
+				printBlocks();
+			#endif
 			
 			#ifdef DEBUG_BUCKETS
 				printBuckets();
@@ -661,7 +616,6 @@ void** initNewBlock() {
 		printf("\033[90m[ERROR] BLOCK ARRAY OUT OF SPACE \033[0m\n");
 	}
 	
-	// printBlocks();
 	#endif	
 	
 	#ifdef DEBUG_PAGE_INIT
@@ -697,11 +651,9 @@ void** initNewBlock() {
 		printf("\033[90m[PAGE INIT] Zeiger verschoben: %p\n\033[0m", ret); 
 	#endif
 	
-	// #ifdef DEBUG_BLOCK
-		// printBlocks();
-	// #endif
-	
-	// printf("Footer pos: %p\n", footer);
+	#ifdef DEBUG_BLOCK
+		printBlocks();
+	#endif
 	
 	return ret;
 }
