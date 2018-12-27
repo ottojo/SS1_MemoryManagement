@@ -8,46 +8,46 @@
 #define NUMBER_OF_BUCKETS 33
 #define MIN_PAGE_DIFF 24
 
-//Notwendig für die Umsetzung des Konzepts des Binnings
-static void** buckets[NUMBER_OF_BUCKETS];
-
 // #define DEBUG_INIT
 // #define DEBUG_PAGE_INIT
 // #define DEBUG_ALLOC
-// #define DEBUG_EXTRACT
-// #define DEBUG_BLOCK
+// #define DEBUG_BLOCK 150
 // #define DEBUG_GETBLOCK
 // #define DEBUG_FREE
 // #define DEBUG_BUCKETS
+// #define DEBUG_SPECIFIED 50000
 #define COLOURED
 
+#ifdef DEBUG_SPECIFIED
+	uint64_t actionCounter = 0;
+#endif
+
 #ifdef DEBUG_BLOCK
-	void* block[100];
+	void* blocks[DEBUG_BLOCK];
 	uint8_t blockCounter = 0;
 #endif
+
+#define extractHeader(ptr) ((header*)((void*)ptr - sizeof(header))) 
+
+//Notwendig für die Umsetzung des Konzepts einer BucketList
+static void** buckets[NUMBER_OF_BUCKETS];
 
 typedef struct header {
 	uint32_t tailSize;
 	uint32_t headSize;
 } header;
 
-//Bessere Namensvorschläge dringend erwünscht!
-typedef struct combinedHeaders {
-	header *frontHeader;
-	header *tailHeader;
-	void **next;
-	void **prev;
-} combinedHeaders;
-
 //Verwendete Hilfsmethoden
 void** initNewBlock();
-combinedHeaders extractHeaderData(void**);				//Extrahiert Header-Daten (auch RestHeader von umliegenden Elementen)
+void removeFreeSpaceFromList(void **ptr);
+
 #ifdef DEBUG_BLOCK
 	void printBlocks();
 #endif
 
 #ifdef DEBUG_BUCKETS
 	void printBuckets();
+	void printBucketState(uint64_t state);
 #endif
 
 
@@ -60,8 +60,6 @@ combinedHeaders extractHeaderData(void**);				//Extrahiert Header-Daten (auch Re
 				Insbesondere sind also gerade bzw. durch 8 teilbare Größenangaben belegte Felder.
 				
 	TODO:
-	- free implementieren
-	- Abspaltung von größeren Blöcken implementieren
 	- Effizienzoptimierung, insbesondere in Bezug auf die Geschwindigkeit
 */
 
@@ -74,6 +72,9 @@ void init_my_alloc() {
 		#endif
 	#endif
 	
+	//Alle Zeiger auf NULL setzen, da von der Methode get_block_from_system() nicht gewährleistet
+	//wird, dass keine alten Daten mehr vorhanden sind --> da meist aber dennoch nichts in den Pages steht,
+	//könnte dies zur Effizienzoptimierung eventuell vernachlässigt werden
 	for(uint8_t i = 0; i < NUMBER_OF_BUCKETS - 1; i++) {
 		buckets[i] = NULL;
 	}
@@ -98,12 +99,20 @@ void* my_alloc(size_t size) {
 		#endif
 	#endif
 	
-	#ifdef DEBUG_BUCKETS
-		printBuckets();
+	#ifdef DEBUG_SPECIFIED
+		printf("Action: %ld\n", actionCounter++);
 	#endif
 	
 	void *ret = NULL;
 	uint8_t pos = (size >> 3) - 1;
+	
+	// #ifdef DEBUG_BUCKETS
+		// printBuckets();
+	// #endif
+	
+	// #ifdef DEBUG_BLOCK
+		// printBlocks();
+	// #endif
 	
 	//Überprüfe, ob im entsprechenden Fach der geforderten Größe noch Speicher vorhanden ist
 	if(buckets[pos]) {
@@ -114,25 +123,27 @@ void* my_alloc(size_t size) {
 				printf("[ALLOC] Feld vorhanden in Bucket %d\n", pos);
 			#endif
 		#endif
-
+		
 		ret = (void*)buckets[pos];
-		//Hier könnte eine Methode eingesetzt werden, welche den prev Zeiger nicht ausliest --> minimaler Effizienzgewinn
-		combinedHeaders headers = extractHeaderData((void**)ret);
-		//Flags für freie Felder entfernen
-		headers.frontHeader->headSize -= 1;
-		headers.tailHeader->tailSize -= 1;
-
-		if(pos > 0) {
-			//>8 Byte Datensegment --> doppelt verkettete Liste
-			//--> prev Zeiger im nächsten Element muss auf null gesetzt werden
-			//Beim 8 Byte Datensegment entfällt dies, da die Liste hier mangels Platz nur einfach verkettet ist
-			if(headers.next && *headers.next) {
-				*((void**)headers.next) = NULL;
+		
+		header *head = extractHeader(ret);
+		head->headSize &= 0xFFFFFFFE;
+		((header*)(ret + head->headSize))->tailSize &= 0xFFFFFFFE;
+		
+		void *nextElem = *((void**)ret);
+		
+		if(nextElem) {
+			if(pos > 0) {
+				//>8 Byte Datensegment --> doppelt verkettete Liste
+				//--> prev Zeiger im nächsten Element muss auf null gesetzt werden
+				//Beim 8 Byte Datensegment entfällt dies, da die Liste hier mangels Platz nur einfach verkettet ist
+				header *nextElemHeader = extractHeader(nextElem);
+				*((void**)(((void*)nextElemHeader) + (nextElemHeader->headSize & 0xFFFFFFFE))) = NULL;
 			}
 		}
 		
-		//Feld aus Liste entfernen		
-		buckets[pos] = *headers.next;
+		//Feld aus Liste entfernen
+		buckets[pos] = (void**)(nextElem);
 	} else {
 		//Kein freies Feld in gesuchter Größe vorhanden
 		#ifdef DEBUG_ALLOC 
@@ -156,31 +167,37 @@ void* my_alloc(size_t size) {
 				#endif
 			#endif
 			
-			combinedHeaders headers = extractHeaderData(buckets[divPos]);
-			
 			ret = (void*)buckets[divPos];
-					
-			//Mittelheader einbauen
-			header *middleHeader = (header*)((buckets[divPos]) + (size >> 3));
-					
-			middleHeader->tailSize = (uint32_t)size;
-			middleHeader->headSize = (uint32_t)(headers.frontHeader->headSize - size - 2*sizeof(uint32_t));
-					
-			//Front- und Tail-Header Felder anpassen
-			headers.frontHeader->headSize = size;
-			headers.tailHeader->tailSize = middleHeader->headSize;
-						
-			//Prev Zeiger im Rest des Blocks auf NULL setzen
-			*(void**)((void*)middleHeader + 2*sizeof(uint32_t)) = NULL;
+			header *head = extractHeader(ret);
+			header *footer = extractHeader((void*)head + (head->headSize & 0xFFFFFFFE) + 2*sizeof(header));
 			
-			//Next Zeiger setzen (sicher NULL, da Präferenzabspaltung wegen Fehlen eines passenden Feldes)
-			*(void**)((void*)headers.tailHeader - sizeof(void*)) = NULL;
+			//Mittelheader einbauen
+			header *middleHeader = (header*)(ret + size);
+			middleHeader->tailSize = (uint32_t)size;
+			middleHeader->headSize = (uint32_t)(head->headSize - size - sizeof(header));
+			
+			//Front- und Tail-Header Felder anpassen
+			head->headSize = size;
+			footer->tailSize = middleHeader->headSize;
+			
+			void *restElem = ((void*)middleHeader + sizeof(header));
+			
+			//Next Zeiger im Rest des Blocks auf NULL setzen
+			*((void**)restElem) = NULL;
+			
+			//Prev Zeiger setzen (sicher NULL, da Präferenzabspaltung wegen Fehlen eines passenden Feldes)
+			*(void**)((void*)footer - sizeof(void*)) = NULL;
 			
 			//Restfeld im Bucket ablegen
-			buckets[pos] = (void**)((void*)(middleHeader) + 2*sizeof(uint32_t));
+			buckets[pos] = (void**)(restElem);
 			
-			//Im Bucket des gespaltenen Feldes aufs nächste Feld wechseln
-			buckets[divPos] = *buckets[divPos];
+			//Im Bucket des gespaltenen Feldes aufs nächste Feld wechseln und dessen prev Zeiger entsprechend NULL setzen
+			void *nextElem = *((void***)ret);
+			buckets[divPos] = nextElem;
+			if(nextElem) {
+				header *nextElemHeader = extractHeader(nextElem);
+				*((void**)((void*)nextElemHeader + (nextElemHeader->headSize & 0xFFFFFFFE))) = NULL;
+			}
 			
 			#ifdef DEBUG_ALLOC 
 				#ifdef COLOURED
@@ -198,15 +215,70 @@ void* my_alloc(size_t size) {
 				#endif
 			#endif
 			
-			if(false) {
+			divPos = pos + 2;
+			while (divPos < NUMBER_OF_BUCKETS - 1 && !buckets[divPos]) {
+				++divPos;
+			}
+			
+			if(divPos < NUMBER_OF_BUCKETS - 1) {
 				//Abspaltung von größerem Block
 				#ifdef DEBUG_ALLOC 
 					#ifdef COLOURED
-						printf("\033[96m[ALLOC] Spalte von groesserem Block ab\n\033[0m");
+						printf("\033[96m[ALLOC] Spalte von groesserem Block [%d] ab\n\033[0m", divPos);
 					#else 
 						printf("[ALLOC] Spalte von groesserem Block ab\n");
 					#endif
 				#endif
+				
+				ret = (void*)buckets[divPos];
+				header *head = extractHeader(ret);
+				// header *footer = extractHeader((void*)head + (head->headSize & 0xFFFFFFFE) + 2*sizeof(header));
+				header *footer = (header*)(ret + (head->headSize & 0xFFFFFFFE));
+				
+				//Mittelheader einbauen
+				header *middleHeader = (header*)(ret + size);
+
+				middleHeader->tailSize = (uint32_t)size;
+				middleHeader->headSize = (uint32_t)(head->headSize - size - sizeof(header));
+
+				//Front- und Tail-Header Felder anpassen
+				head->headSize = size;
+				footer->tailSize = middleHeader->headSize;
+
+				//Prev Zeiger im Rest des Blocks auf NULL setzen
+				*((void**)((void*)footer - sizeof(void*))) = NULL;
+
+				uint8_t insertPos = ((middleHeader->headSize - 1) >> 3) - 1;
+		
+				//Next-Zeiger setzen
+				void *nextElem = buckets[insertPos];
+				*((void**)((void*)middleHeader + sizeof(header))) = nextElem;
+	
+				//Falls nachfolgendes Element vorhanden (und länger als 1 Byte) prev Zeiger setzen
+				if(nextElem) {
+					if(insertPos != 0) {
+						header *headNext = extractHeader(nextElem); 
+						*((void**)((void*)headNext + (headNext->headSize & 0xFFFFFFFE))) = ((void*)(middleHeader) + sizeof(header));
+					}
+				}
+				
+				buckets[insertPos] = (void**)((void*)(middleHeader) + sizeof(header));
+				
+				//Im Bucket des gespaltenen Feldes aufs nächste Feld wechseln und dessen prev Zeiger entsprechend NULL setzen
+				void *nextSplittedElem = *((void***)ret);
+				buckets[divPos] = nextSplittedElem;
+				if(nextSplittedElem) {		// &&divPos != 0 -->immer wahr
+					header *nextElemHeader = extractHeader(nextSplittedElem);
+					*((void**)((void*)nextElemHeader + (nextElemHeader->headSize & 0xFFFFFFFE))) = NULL;
+				}
+				
+				#ifdef DEBUG_ALLOC 
+					#ifdef COLOURED
+						printf("\033[96m[ALLOC] Element-Rest eingeordnet bei %d (Size: %d)\n\033[0m", ((middleHeader->headSize - 1) >> 3) - 1, middleHeader->headSize - 1);
+					#else 
+						printf("[ALLOC] Element-Rest eingeordnet bei %d (Size: %d)\n", ((middleHeader->headSize - 1) >> 3) - 1, middleHeader->headSize - 1);
+					#endif
+				#endif	
 			} else {
 				//Abspaltung von Page
 				#ifdef DEBUG_ALLOC 
@@ -217,7 +289,6 @@ void* my_alloc(size_t size) {
 					#endif
 				#endif
 				
-				//Auslesen der Restgröße der Page
 				if(!buckets[NUMBER_OF_BUCKETS - 1]) {
 					//Keine Page mehr vorhanden --> neue holen
 					#ifdef DEBUG_ALLOC 
@@ -230,10 +301,11 @@ void* my_alloc(size_t size) {
 					buckets[NUMBER_OF_BUCKETS - 1] = initNewBlock();
 				}
 				
-				combinedHeaders headers = extractHeaderData(buckets[NUMBER_OF_BUCKETS - 1]);
-				//printf("restPageSize: %d\n", headers.frontHeader->headSize);
+				//Auslesen der Restgröße der Page / des > 256 Byte Blocks
+				header *head = extractHeader((void*)buckets[NUMBER_OF_BUCKETS - 1]);
+				header *footer = (header*)((void*)head + (head->headSize & 0xFFFFFFFE) + sizeof(header));
 				
-				if(headers.frontHeader->headSize >= size + MIN_PAGE_DIFF) {
+				if(head->headSize >= size + MIN_PAGE_DIFF) {
 					//Abspalten lohnt sich
 					#ifdef DEBUG_ALLOC 
 						#ifdef COLOURED
@@ -244,44 +316,60 @@ void* my_alloc(size_t size) {
 					#endif
 					
 					ret = (void*)buckets[NUMBER_OF_BUCKETS - 1];
-					
+					void *nextElem = *(buckets[NUMBER_OF_BUCKETS - 1]);
+
 					//Mittelheader einbauen
-					header *middleHeader = (header*)((buckets[NUMBER_OF_BUCKETS - 1]) + (size >> 3));
-					
-					//printf("Middle: %p\n", middleHeader);
+					header *middleHeader = (header*)((void*)ret + size);
 					
 					middleHeader->tailSize = (uint32_t)size;
-					middleHeader->headSize = (uint32_t)(headers.frontHeader->headSize - size - 2*sizeof(uint32_t));
+					middleHeader->headSize = (uint32_t)(head->headSize - size - sizeof(header));
 					
 					//Front- und Tail-Header Felder anpassen
-					headers.frontHeader->headSize = size;
-					headers.tailHeader->tailSize = middleHeader->headSize;
+					head->headSize = size;
+					footer->tailSize = middleHeader->headSize;
+					
+					void **restElem = (void**)((void*)middleHeader + sizeof(header));
 					
 					if(middleHeader->headSize <= 256) {
 						uint8_t insertPos = ((middleHeader->headSize - 1) >> 3) - 1;
-						
-						//Prev Zeiger im Rest des Blocks auf NULL setzen
-						*(void**)((void*)middleHeader + 2*sizeof(uint32_t)) = NULL;
-						*(void**)((void*)headers.tailHeader - sizeof(void*)) = buckets[insertPos];
-						
+						//Next-Zeiger setzen
+						*restElem = buckets[insertPos];
 						//Falls nachfolgendes Element vorhanden (und länger als 1 Byte) prev Zeiger setzen
-						if(buckets[insertPos] && insertPos != 0) {
-							*((void**)buckets[insertPos]) = ((void*)(middleHeader) + 2*sizeof(uint32_t));
+						if(insertPos != 0 && buckets[insertPos]) {
+							header *headNext = extractHeader(buckets[insertPos]);		
+							*((void**)((void*)headNext + (headNext->headSize & 0xFFFFFFFE))) = (void*)restElem;
 						} 
 						
-						buckets[insertPos] = ((void*)(middleHeader) + 2*sizeof(uint32_t));
-						
+						buckets[insertPos] = restElem;
 						#ifdef DEBUG_ALLOC 
 							#ifdef COLOURED
-								printf("\033[96m[ALLOC] Page-Rest eingeordnet bei %d (Size: %d)\n\033[0m", ((middleHeader->headSize - 1) >> 3) - 1, middleHeader->headSize - 1);
+								printf("\033[96m[ALLOC] Page-Rest eingeordnet bei %d (Size: %d)\n\033[0m", insertPos, middleHeader->headSize & 0xFFFFFFFE);
+								
 							#else 
-								printf("[ALLOC] Page-Rest eingeordnet bei %d (Size: %d)\n", ((middleHeader->headSize - 1) >> 3) - 1, middleHeader->headSize - 1);
+								printf("[ALLOC] Page-Rest eingeordnet bei %d (Size: %d)\n", insertPos, middleHeader->headSize & 0xFFFFFFFE);
 							#endif
 						#endif
 						
-						buckets[NUMBER_OF_BUCKETS - 1] = NULL;
+						//Im Bucket des gespaltenen Feldes aufs nächste Feld wechseln und dessen prev Zeiger entsprechend NULL setzen
+						buckets[NUMBER_OF_BUCKETS - 1] = nextElem;
+						if(nextElem) {
+							header *nextElemHeader = extractHeader(nextElem);
+							*((void**)((void*)nextElemHeader + (nextElemHeader->headSize & 0xFFFFFFFE))) = NULL;
+						}	
 					} else {
-						buckets[NUMBER_OF_BUCKETS - 1] = ((void*)(middleHeader) + 2*sizeof(uint32_t));
+						//Next-Zeiger mitnehmen um Liste konsistent zu halten
+						*restElem = nextElem;
+						
+						//Prev-Zeiger des nachfolgenden Listenelements entsprechend verschieben
+						if(nextElem) {
+							header *nextElemHeader = extractHeader(nextElem);
+							// printf("Header: %d | %d\n", nextElemHeader->tailSize, nextElemHeader->headSize);
+							*((void**)((void*)nextElemHeader + (nextElemHeader->headSize & 0xFFFFFFFE))) = (void*)restElem;
+						}
+						
+						//Neuen Listenanfang setzen
+						buckets[NUMBER_OF_BUCKETS - 1] = restElem;
+						
 						#ifdef DEBUG_ALLOC 
 							#ifdef COLOURED
 								printf("\033[96m[ALLOC] Page-Rest nicht neu eingeordnet!\n\033[0m");
@@ -303,64 +391,258 @@ void* my_alloc(size_t size) {
 					ret = buckets[NUMBER_OF_BUCKETS - 1];
 					
 					//Flags für freies Feld entfernen
-					headers.frontHeader->headSize -= 1;
-					headers.tailHeader->tailSize -= 1;
+					head->headSize &= 0xFFFFFFFE;
+					footer->tailSize &= 0xFFFFFFFE;
 					
-					buckets[NUMBER_OF_BUCKETS - 1] = NULL;
+					//Auf nächstes Element wechseln und prev Pointer von diesem entsprechend NULL setzen 
+					void *nextElem = *(buckets[NUMBER_OF_BUCKETS - 1]);
+					buckets[NUMBER_OF_BUCKETS - 1] = nextElem;
+					if(nextElem) {
+						// puts("A");
+						header *nextElemHeader = extractHeader(nextElem);
+						// printf("NextElemHeader %d | %d\n", nextElemHeader->tailSize, nextElemHeader->headSize);
+						// puts("B");
+						*((void**)((void*)nextElemHeader + (nextElemHeader->headSize & 0xFFFFFFFE))) = NULL;
+						// puts("C");
+					}
+					
+					// puts("ENDE");
 				}
 			}
 		}
 	}
 	
-	#ifdef DEBUG_BLOCK
-		printBlocks();
+	#ifdef DEBUG_SPECIFIED
+		if(actionCounter > DEBUG_SPECIFIED) {
+			#ifdef DEBUG_BLOCK
+				printBlocks();
+			#endif
+			
+			#ifdef DEBUG_BUCKETS
+				printBuckets();
+			#endif
+		}
 	#endif
-	
 	return ret;
 }
 
 void my_free(void* ptr) {	
-	//Triviale Implementierung, lediglich einhängen in Liste
-	#ifdef DEBUG_FREE 
-		printf("\033[32m[FREE] Freeing %p\n\033[0m", ptr); 
+	#ifdef DEBUG_SPECIFIED
+		printf("Action: %ld\n", actionCounter++);
 	#endif
-	
-	#ifdef DEBUG_BUCKETS
-		printBuckets();
-	#endif
-	
-	combinedHeaders headers = extractHeaderData(ptr);
 
-	// uint8_t insertPos = (((headers.frontHeader->headSize)) >> 3) - 1;
-	uint8_t insertPos = (((headers.frontHeader->headSize)) >> 3) - 1;
+	header *head = extractHeader(ptr);
+	header *footer = (header*)((void*)head + (head->headSize & 0xFFFFFFFE) + sizeof(header));
+	uint32_t freeSize = head->headSize + 1;
 	
-	//Feld als frei markieren
-	headers.frontHeader->headSize += 1;
-	headers.tailHeader->tailSize += 1;
+	#ifdef DEBUG_FREE 
+		printf("\033[32m[FREE] Freeing %p [Size: %d]\n\033[0m", ptr, freeSize & 0xFFFFFFFE); 
+		//printf("Header: %d | %d\t\tFooter: %d | %d\n", head->tailSize, head->headSize, footer->tailSize, footer->headSize);
+	#endif
 	
-	//Prev Zeiger im einzufügenden Feld auf NULL setzen
-	*((void**)ptr) = NULL;
+	header *newHeader = head;
+	header *newFooter = footer;
 	
-	//Falls nachfolgendes Element vorhanden (und länger als 1 Byte) prev Zeiger setzen
-	if(buckets[insertPos]) {
-		if(insertPos != 0) {
-			*buckets[insertPos] = ptr;
+	//Überprüfe, ob vor dem freizugebenden Feld ebenfalls ein freies Feld liegt
+	if(head->tailSize & 1) {
+		//Vorderes Feld ist frei
+		uint32_t realSize = head->tailSize & 0xFFFFFFFE;
+		uint8_t bucketPos = (realSize > 257) ? NUMBER_OF_BUCKETS - 1 : (realSize >> 3) - 1;
+		
+		#ifdef DEBUG_FREE
+			printf("\033[32m[FREE] Vorderes Feld frei [Size: %d, Pos: %d]\n\033[0m", realSize, bucketPos);
+		#endif
+		
+		freeSize += realSize + sizeof(header);
+		
+		newHeader = (header*)((void*)head - realSize - sizeof(header));
+		
+		//Element aus Liste entfernen
+		if(head->tailSize == 9) {
+			void** ptrToDel = (void*)newHeader + sizeof(header);
+			void **elem = buckets[0];
+			void **prevElem = NULL;
+			
+			#ifdef DEBUG_FREE
+				printf("\033[32m[FREE] Entferne %p aus einfach verketteter Liste!\033[0m\n", ptrToDel);
+			#endif
+			
+			while((void*)elem != ptrToDel) {
+				prevElem = elem;
+				elem = (void**)(*elem);
+			}
+			
+			//Element aus Liste aushängen
+			if(prevElem == NULL) {
+				//Element steht ganz vorne in der Liste
+				buckets[0] = (void**)*elem;
+			} else {
+				*prevElem = *elem;
+			}
+			
+		} else {
+			#ifdef DEBUG_FREE
+				printf("\033[32m[FREE] Entferne %p aus doppelt verketteter Liste!\033[0m\n", (void*)newHeader + sizeof(header));
+			#endif
+			
+			void*** prevPtr = (void***)((void*)head - sizeof(void*));
+			void*** nextPtr = (void***)((void*)newHeader + sizeof(header));
+			
+			// printf("prevPtr:   %p\n", prevPtr);
+			// if(prevPtr) {
+				// printf("*prevPtr:  %p\n", *prevPtr);
+				// if(*prevPtr) {
+					// printf("**prevPtr: %p\n", **prevPtr);
+				// }
+			// }
+			
+			// printf("nextPtr:   %p\n", nextPtr);
+			// if(nextPtr) {
+				// printf("*nextPtr:  %p\n", *nextPtr);
+				// if(*nextPtr) {
+					// printf("**nextPtr: %p\n", **nextPtr);
+				// }
+			// }
+			
+			//Next Pointer des in der Liste vorher eingeordneten Feldes umbiegen
+			if(prevPtr && *prevPtr) {
+				// puts("A1");
+				**prevPtr = (void*)*nextPtr;
+			} else {
+				// puts("B1");
+				//Element steht am Anfang der Liste
+				buckets[bucketPos] = *nextPtr;
+			}
+			
+			//Prev Pointer des in der Liste dahinter eingeordneten Feldes umbiegen	
+			if(nextPtr && *nextPtr) {
+				// puts("C1");
+				header *nextElemHeader = (header*)((void*)(*nextPtr) - sizeof(header));
+				*(void**)((void*)nextElemHeader + (nextElemHeader->headSize & 0xFFFFFFFE)) = (void*)(*prevPtr);
+			} //Else: Element steht am Ende der Liste --> nichts zu tun
 		}
-		headers.next = buckets[insertPos];
-	} else {
-		*headers.next = NULL;
 	}
 	
+	//Überprüfe, ob hinter dem freizugebenden Feld ebenfalls ein freies Feld liegt
+	if(footer->headSize & 1) {
+		//Hinteres Feld ist frei
+		uint32_t realSize = footer->headSize & 0xFFFFFFFE;
+		uint8_t bucketPos = (realSize > 257) ? NUMBER_OF_BUCKETS - 1 : (realSize >> 3) - 1;
+		
+		#ifdef DEBUG_FREE
+			printf("\033[32m[FREE] Hinteres Feld frei [Size: %d, Pos: %d]\n\033[0m", realSize, bucketPos);
+		#endif
+		
+		freeSize += realSize + sizeof(header);
+		
+		newFooter = (header*)((void*)footer + + sizeof(header) + realSize);
+		
+		//Element aus Liste entfernen
+		if(footer->headSize == 9) {
+			void** ptrToDel = (void*)footer + sizeof(header);
+			void **elem = buckets[0];
+			void **prevElem = NULL;
+			
+			#ifdef DEBUG_FREE
+				printf("\033[32m[FREE] Entferne %p aus einfach verketteter Liste!\033[0m\n", (void*)footer + sizeof(header));
+			#endif
+			
+			while((void*)elem != ptrToDel) {
+				prevElem = elem;
+				elem = (void**)(*elem);
+			}
+			
+			//Element aus Liste aushängen
+			if(prevElem == NULL) {
+				//Element steht ganz vorne in der Liste
+				buckets[0] = (void**)*elem;
+			} else {
+				*prevElem = *elem;
+			}
+			
+		} else {
+			#ifdef DEBUG_FREE
+				printf("\033[32m[FREE] Entferne %p aus doppelt verketteter Liste!\033[0m\n", (void*)footer + sizeof(header));
+			#endif
+			
+			void*** prevPtr = (void***)((void*)newFooter - sizeof(void*));
+			void*** nextPtr = (void***)((void*)footer + sizeof(header));
+			
+			// printf("prevPtr:   %p\n", prevPtr);
+			// if(prevPtr) {
+				// printf("*prevPtr:  %p\n", *prevPtr);
+				// if(*prevPtr) {
+					// printf("**prevPtr: %p\n", **prevPtr);
+				// }
+			// }
+			
+			// printf("nextPtr:   %p\n", nextPtr);
+			// if(nextPtr) {
+				// printf("*nextPtr:  %p\n", *nextPtr);
+				// if(*nextPtr) {
+					// printf("**nextPtr: %p\n", **nextPtr);
+				// }
+			// }
+			
+			//Next Pointer des in der Liste vorher eingeordneten Feldes umbiegen
+			if(prevPtr && *prevPtr) {
+				// puts("A2");
+				**prevPtr = (void*)*nextPtr;
+			} else {
+				// puts("B2");
+				//Element steht am Anfang der Liste
+				buckets[bucketPos] = *nextPtr;
+				// printf("buckets[%d]: %p\n", bucketPos, buckets[bucketPos]);
+			}
+			
+			//Prev Pointer des in der Liste dahinter eingeordneten Feldes umbiegen
+			if(nextPtr && *nextPtr) {
+				// puts("C2");
+				header *nextElemHeader = (header*)((void*)(*nextPtr) - sizeof(header));
+				*((void**)((void*)nextElemHeader + (nextElemHeader->headSize & 0xFFFFFFFE))) = (void*)(*prevPtr);
+			} //Else: Element steht am Ende der Liste --> nichts zu tun
+		}
+	}
 	
-	// headers.next ? printf("Next set *: %p\n", *headers.next) : printf("Next set: %p\n", headers.next);
-	buckets[insertPos] = (void**)ptr;
+	newHeader->headSize = freeSize;
+	newFooter->tailSize = freeSize;
+	
+	uint8_t insertPos = (freeSize > 257) ? NUMBER_OF_BUCKETS - 1 : ((freeSize - 1) >> 3) - 1;
+	
+	void *nextElem = buckets[insertPos];
+	
+	void **elemPtr = (void**)((void*)newHeader + sizeof(header)); 
+
+	//Next-Zeiger setzen
+	*elemPtr = nextElem;
+	
+	//Prev-Zeiger auf NULL setzen (falls Elementgröße >8 Bytes)
+	if(insertPos > 0) {
+		*((void**)((void*)newFooter - sizeof(void*))) = NULL;
+
+		//Falls nachfolgendes Element vorhanden (und länger als 1 Byte) prev Zeiger setzen
+		if(nextElem) {
+			header *headNext = extractHeader(nextElem); 
+			*((void**)((void*)headNext + (headNext->headSize & 0xFFFFFFFE))) = ((void*)(newHeader) + sizeof(header));
+		}
+	}
+	
+	buckets[insertPos] = elemPtr;
 	
 	#ifdef DEBUG_FREE 
-		printf("\033[32m[FREE] Element eingeordnet bei %d (Size: %d)\n\033[0m", insertPos, headers.frontHeader->headSize - 1);
+		printf("\033[32m[FREE] Element eingeordnet bei %d (Size: %d)\n\033[0m", insertPos, freeSize - 1);
 	#endif
 	
-	#ifdef DEBUG_BLOCK
-		printBlocks();
+	#ifdef DEBUG_SPECIFIED
+		if(actionCounter > DEBUG_SPECIFIED) {
+			// #ifdef DEBUG_BLOCK
+				// printBlocks();
+			// #endif
+			
+			#ifdef DEBUG_BUCKETS
+				printBuckets();
+			#endif
+		}
 	#endif
 }
 
@@ -372,7 +654,14 @@ void** initNewBlock() {
 	void** ret = (void**)get_block_from_system();
 	
 	#ifdef DEBUG_BLOCK
-		block[blockCounter++] = (void*)ret;	
+		if(blockCounter < DEBUG_BLOCK) {
+		blocks[blockCounter++] = ret;
+		printf("Added %d. page to block array\n", blockCounter);
+	} else {
+		printf("\033[90m[ERROR] BLOCK ARRAY OUT OF SPACE \033[0m\n");
+	}
+	
+	// printBlocks();
 	#endif	
 	
 	#ifdef DEBUG_PAGE_INIT
@@ -385,75 +674,36 @@ void** initNewBlock() {
 	}
 	
 	//Header an den Anfang der Page setzen
-	header *head = ((header*)ret);
+	header *head = (header*)ret;
 	head->tailSize = 0;
-	head->headSize = BLOCKSIZE - 4* sizeof(uint32_t) + 1;	//+1 als Flag für freies Feld
+	head->headSize = (BLOCKSIZE - 2*sizeof(header)) | 1;	//+1 als Flag für freies Feld
 	
 	//"Footer" (header verwendet als Footer) an das Ende der Page setzen
-	head = ((header*)((void*)ret + BLOCKSIZE - 2*sizeof(uint32_t))); //+1 als Flag für freies Feld
-	head->tailSize = BLOCKSIZE - 4*sizeof(uint32_t) + 1;
-	head->headSize = 0;	
+	header *footer = ((header*)((void*)ret + BLOCKSIZE - sizeof(header))); //+1 als Flag für freies Feld
+	footer->tailSize = head->headSize;
+	footer->headSize = 0;	
 	
 	#ifdef DEBUG_PAGE_INIT
-		printf("\033[90m[PAGE INIT] Header und Footer erstellt (Footer-pos: %p, Nutzgroesse: %d)\n\033[0m", head, head->tailSize - 1); 
+		printf("\033[90m[PAGE INIT] Header und Footer erstellt (Footer-pos: %p, Nutzgroesse: %d)\n\033[0m", head, footer->tailSize - 1); 
 	#endif
 	
 	ret ++;			//Zeiger hinter Header-Paket verschieben (--> verschieben um 8 Byte (entspricht Pointergröße))
 	
 	//Eventuell überflüssig
-	// *(void**)ret = NULL;
+	*(void**)ret = NULL;					//next-Pointer auf NULL setzen
+	*(void**)(footer - sizeof(void*)) = NULL; 	//prev-Pointer auf NULL setzen
 	
 	#ifdef DEBUG_PAGE_INIT
 		printf("\033[90m[PAGE INIT] Zeiger verschoben: %p\n\033[0m", ret); 
 	#endif
 	
-	#ifdef DEBUG_BLOCK
-		printBlocks();
-	#endif
-	
-	return ret;
-}
-
-/**
-Methode zum Extrahieren der beiden Header um das Datenpaket herum. Ausgelesen werden sollen dabei eigentlich auch die
-Zeiger next und prev, aber dies funktioniert aktuell noch nicht. 
-*/
-combinedHeaders extractHeaderData(void **ptr) {
 	// #ifdef DEBUG_BLOCK
 		// printBlocks();
 	// #endif
-
-	combinedHeaders headers;
 	
-	headers.frontHeader = (header*)((void*)ptr - 2*sizeof(uint32_t));
+	// printf("Footer pos: %p\n", footer);
 	
-	if((headers.frontHeader->headSize & 0x01)) {
-		//Feld ist frei
-		headers.tailHeader = (header*)((void*)ptr + (headers.frontHeader->headSize & 0xfffe));
-		//Nur falls nicht von der Page gelesen wird (da immer nur eine Page gehalten wird sind die Pointer hier immer NULL)
-		if(headers.frontHeader->headSize <= 257) {
-			headers.next = (void**)((void*)headers.tailHeader - sizeof(void*));
-			headers.prev = ptr;
-		} else {			//Ist dieses else überhaupt notwendig???
-			headers.next = (void**)NULL;
-			headers.prev = (void**)NULL;
-		}
-	} else {
-		headers.tailHeader = (header*)((void*)ptr + headers.frontHeader->headSize);
-		headers.prev = ptr;
-		// headers.next = (void**)((void*)headers.tailHeader - sizeof(void*));
-		headers.next = (void**)((void*)headers.tailHeader - sizeof(void*));
-	}
-	
-	#ifdef DEBUG_EXTRACT
-		if(headers.next && headers.prev) {
-			printf("\033[34m[EXTRACT] front: %d | %d\t back: %d | %d\t*prev: %p | *next: %p\n\033[0m", headers.frontHeader->tailSize, headers.frontHeader->headSize, headers.tailHeader->tailSize, headers.tailHeader->headSize, *headers.prev, *headers.next);
-		} else {
-			printf("\033[34m[EXTRACT] front: %d | %d\t back: %d | %d\tprev: %p | next: %p\n\033[0m", headers.frontHeader->tailSize, headers.frontHeader->headSize, headers.tailHeader->tailSize, headers.tailHeader->headSize, NULL, NULL);		
-		}
-	#endif
-	
-	return headers;
+	return ret;
 }
 
 #ifdef DEBUG_BLOCK
@@ -465,7 +715,7 @@ void printBlocks() {
 	
 	for(uint8_t z = 0; z < blockCounter; z++) {
 		printf("Block %d:\n", z);
-		uint32_t *ptr = (uint32_t*)block[z];
+		uint32_t *ptr = (uint32_t*)blocks[z];
 		uint32_t firstPointer = BLOCKSIZE + 5, secondPointer = BLOCKSIZE + 5;
 		bool used = false;
 		
@@ -517,22 +767,37 @@ void printBlocks() {
 	}
 	printf("\n############## BLOCK MAP ######################\n");
 }
+
 #endif
 
 #ifdef DEBUG_BUCKETS
+void printBucketState(uint64_t state) {
+	for(int8_t i = 1; i <= 40; i++) {
+		printf("%ld", (state >> (40 - i)) & 1);
+		if(i % 8 == 0) {printf(" ");} 
+	}
+	
+	// printf("\t%#x\n", state);
+	printf("\n");
+}
+
 void printBuckets() {
-	printf("\nBuckets:");
+	// printf("\nBucketState: "); 
+	// printBucketState(bucketState);
 	for(uint8_t i = 0; i < NUMBER_OF_BUCKETS; i++) {
 		printf("\n[%2d]: ", i);
 		
 		void **ptr = buckets[i];
-		
-		while(ptr) {
+		uint32_t counter = 0;
+		while(ptr && counter < 100) {
 			printf("%p --> ", ptr);
+			fflush(stdout);
 			if(*ptr) {
 				ptr = *ptr;
+				counter ++;
 			} else {
 				printf("NULL");
+				fflush(stdout);
 				break;
 			}
 		}
